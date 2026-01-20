@@ -12,7 +12,7 @@
 
 # Configuration
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-WORK_DIR="/sci/labs/orzuk/orzuk/github/BandedDecomposition"
+WORK_DIR="/sci/labs/orzuk/orzuk/github/ConstrainedDecomposition"
 CONDA_ENV="pymol-env"
 
 # Parameter arrays
