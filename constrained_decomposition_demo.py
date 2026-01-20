@@ -420,48 +420,82 @@ if __name__ == "__main__":
         print("\nHeatmap figures saved in:", outdir)
 
         # ============================================================
-        # Print LaTeX table for paper
+        # Print LaTeX table rows for paper (Empirical section only)
+        # Format: Examples as columns (I, II, III, IV)
         # ============================================================
         print("\n" + "=" * 80)
-        print("LATEX TABLE (copy & paste to paper)")
+        print("LATEX TABLE - EMPIRICAL SECTION (copy & paste to paper)")
+        print("Replace the --- placeholders in the Empirical section")
         print("=" * 80)
-        print(r"""\begin{table}[htbp]
-\centering
-\caption{Numerical results for the four algebraic examples.}
-\label{tab:numerical_results}
-\begin{tabular}{clcccccc}
-\toprule
-Ex. & Solver & Per-iter complexity & $n$ & Dims & $K$ & Time (s) & $\|\nabla\Phi\|$ \\
-\midrule""")
-        for r in results_summary:
-            iters_str = str(r['iters']) if r['iters'] != '?' else '?'
-            grad_str = f"{r['grad_norm']:.1e}" if r['grad_norm'] is not None else "N/A"
-            # Format complexity for LaTeX (remove K, use proper math)
-            cplx = r['complexity']
-            # Remove K from complexity (it's reported separately)
-            cplx = cplx.replace('K', '')
-            # Convert unicode superscripts
-            cplx = cplx.replace('³', '^3').replace('²', '^2').replace('⊥', r'^{\perp}')
-            # Clean up spacing
-            cplx = cplx.replace('  ', ' ').replace('( ', '(').replace('(n', '(n').replace('(m', '(m')
-            # Wrap in math mode
-            complexity_latex = f"$O({cplx.split('O(')[1].rstrip(')')})$" if 'O(' in cplx else cplx
-            # Get dimension string
-            dims = r['dims']
-            if 'm⊥' in dims:
-                dim_str = f"$m^\\perp={dims['m⊥']}$"
-            elif 'b' in dims:
-                dim_str = f"$m={dims.get('m','?')}, b={dims['b']}$"
-            elif 'r' in dims:
-                dim_str = f"$m={dims.get('m','?')}, r={dims['r']}$"
+
+        # Build a dict keyed by example number for easy column access
+        by_ex = {r['example']: r for r in results_summary}
+
+        def fmt_grad(g):
+            if g is None:
+                return "---"
+            exp = int(f"{g:.0e}".split('e')[1])
+            coef = g / (10 ** exp)
+            return f"${coef:.1f} \\times 10^{{{exp}}}$"
+
+        def fmt_recon(r):
+            if r is None:
+                return "---"
+            exp = int(f"{r:.0e}".split('e')[1])
+            coef = r / (10 ** exp)
+            return f"${coef:.1f} \\times 10^{{{exp}}}$"
+
+        # Instance size row
+        row_n = "Instance size &\n"
+        row_n += " &\n".join([f"$n={by_ex.get(ex, {}).get('n', '---')}$" if ex in by_ex else "$n=$---"
+                              for ex in ['I', 'II', 'III', 'IV']])
+        row_n += " \\\\"
+
+        # Constraint dim row (different format per example)
+        dims_list = []
+        for ex in ['I', 'II', 'III', 'IV']:
+            if ex not in by_ex:
+                dims_list.append("---")
             else:
-                dim_str = f"$m={dims.get('m','?')}$"
-            # Solver name for LaTeX
-            solver_latex = r['solver'].replace('-', ' ').replace('_', ' ')
-            print(f"{r['example']} & {solver_latex} & {complexity_latex} & {r['n']} & {dim_str} & {iters_str} & {r['time']:.3f} & ${grad_str.replace('e', r'\times 10^{').replace('+', '')}}}$ \\\\")
-        print(r"""\bottomrule
-\end{tabular}
-\end{table}""")
+                d = by_ex[ex]['dims']
+                if ex == 'I':
+                    dims_list.append(f"$m={d.get('m', '?')}$")
+                elif ex == 'II':
+                    dims_list.append(f"$m^\\perp={d.get('m⊥', '?')}$")
+                elif ex == 'III':
+                    # For group case, show m_G (reduced dim) - need to get from info
+                    m_G = by_ex[ex].get('info', {}).get('m_G', d.get('m', '?'))
+                    dims_list.append(f"$m_G={m_G}$")
+                elif ex == 'IV':
+                    dims_list.append(f"$m={d.get('m', '?')}$,\\ $b={d.get('b', '?')}$")
+        row_dim = "Constraint dim. &\n" + " &\n".join(dims_list) + " \\\\"
+
+        # Newton iters row
+        row_iters = "Newton iters &\n"
+        row_iters += " & ".join([str(by_ex.get(ex, {}).get('iters', '---')) for ex in ['I', 'II', 'III', 'IV']])
+        row_iters += " \\\\"
+
+        # Time row
+        row_time = "Time (s) &\n"
+        row_time += " & ".join([f"{by_ex[ex]['time']:.3f}" if ex in by_ex else "---" for ex in ['I', 'II', 'III', 'IV']])
+        row_time += " \\\\"
+
+        # Gradient norm row
+        row_grad = "Final $\\|\\nabla\\Phi\\|_2$ &\n"
+        row_grad += " &\n".join([fmt_grad(by_ex[ex].get('grad_norm')) if ex in by_ex else "---" for ex in ['I', 'II', 'III', 'IV']])
+        row_grad += " \\\\"
+
+        # Reconstruction error row
+        row_recon = "$\\|A-(B^{-1}+C)\\|_F$ &\n"
+        row_recon += " &\n".join([fmt_recon(by_ex[ex].get('recon')) if ex in by_ex else "---" for ex in ['I', 'II', 'III', 'IV']])
+        row_recon += " \\\\"
+
+        print(row_n)
+        print(row_dim)
+        print(row_iters)
+        print(row_time)
+        print(row_grad)
+        print(row_recon)
 
     if not any_ran:
         print("Nothing selected. Use --all or --run demo1_primal_smallS,...")
