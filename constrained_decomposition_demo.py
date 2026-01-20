@@ -417,8 +417,51 @@ if __name__ == "__main__":
             grad_str = f"{r['grad_norm']:.2e}" if r['grad_norm'] is not None else "N/A"
             print(f"{r['example']:<5} {r['solver']:<25} {r['complexity']:<18} {r['n']:<6} {iters_str:<5} {r['time']:<10.4f} {grad_str:<10}")
         print("-" * 80)
-        print("\nCopy relevant rows to Table 2 in the paper.")
-        print("Heatmap figures saved in:", outdir)
+        print("\nHeatmap figures saved in:", outdir)
+
+        # ============================================================
+        # Print LaTeX table for paper
+        # ============================================================
+        print("\n" + "=" * 80)
+        print("LATEX TABLE (copy & paste to paper)")
+        print("=" * 80)
+        print(r"""\begin{table}[htbp]
+\centering
+\caption{Numerical results for the four algebraic examples.}
+\label{tab:numerical_results}
+\begin{tabular}{clcccccc}
+\toprule
+Ex. & Solver & Per-iter complexity & $n$ & Dims & $K$ & Time (s) & $\|\nabla\Phi\|$ \\
+\midrule""")
+        for r in results_summary:
+            iters_str = str(r['iters']) if r['iters'] != '?' else '?'
+            grad_str = f"{r['grad_norm']:.1e}" if r['grad_norm'] is not None else "N/A"
+            # Format complexity for LaTeX (remove K, use proper math)
+            cplx = r['complexity']
+            # Remove K from complexity (it's reported separately)
+            cplx = cplx.replace('K', '')
+            # Convert unicode superscripts
+            cplx = cplx.replace('³', '^3').replace('²', '^2').replace('⊥', r'^{\perp}')
+            # Clean up spacing
+            cplx = cplx.replace('  ', ' ').replace('( ', '(').replace('(n', '(n').replace('(m', '(m')
+            # Wrap in math mode
+            complexity_latex = f"$O({cplx.split('O(')[1].rstrip(')')})$" if 'O(' in cplx else cplx
+            # Get dimension string
+            dims = r['dims']
+            if 'm⊥' in dims:
+                dim_str = f"$m^\\perp={dims['m⊥']}$"
+            elif 'b' in dims:
+                dim_str = f"$m={dims.get('m','?')}, b={dims['b']}$"
+            elif 'r' in dims:
+                dim_str = f"$m={dims.get('m','?')}, r={dims['r']}$"
+            else:
+                dim_str = f"$m={dims.get('m','?')}$"
+            # Solver name for LaTeX
+            solver_latex = r['solver'].replace('-', ' ').replace('_', ' ')
+            print(f"{r['example']} & {solver_latex} & {complexity_latex} & {r['n']} & {dim_str} & {iters_str} & {r['time']:.3f} & ${grad_str.replace('e', r'\times 10^{').replace('+', '')}}}$ \\\\")
+        print(r"""\bottomrule
+\end{tabular}
+\end{table}""")
 
     if not any_ran:
         print("Nothing selected. Use --all or --run demo1_primal_smallS,...")
