@@ -87,14 +87,11 @@ def solve_dual(A, basis, basis_perp=None, log_prefix="", **kwargs):
 
 def solve_block_direct(A, basis, log_prefix="", **kwargs):
     """
-    Efficient block-direct solver for Demo III.
-    Directly parameterizes B by O(r²) block values instead of using O(n²) basis.
+    [DEPRECATED] Use solve_block_efficient instead.
     """
     verbose_local = kwargs.pop("verbose", globals().get("verbose", False))
-    tol = kwargs.pop("tol", 1e-6)  # Looser tolerance for faster convergence
-    max_iter = kwargs.pop("max_iter", 200)  # More iterations allowed
-
-    # Extract blocks and free_pairs from kwargs
+    tol = kwargs.pop("tol", 1e-6)
+    max_iter = kwargs.pop("max_iter", 200)
     blocks = kwargs.pop("blocks", None)
     free_pairs = kwargs.pop("free_pairs", None)
 
@@ -112,6 +109,41 @@ def solve_block_direct(A, basis, log_prefix="", **kwargs):
         log_prefix=log_prefix,
     )
     return {"B": B, "C": C, "x": x, "solver": "block-direct", "info": info}
+
+
+def solve_block_efficient(A, basis, log_prefix="", **kwargs):
+    """
+    Efficient block-level solver for Demo III.
+
+    Works entirely in block-parameter space with O(r³) per iteration complexity.
+    Never builds O(n²) entry-level basis matrices.
+
+    Required kwargs:
+        blocks: list of index arrays (partition into r blocks)
+        active_blocks: list of (i, j) tuples where C can be nonzero
+    """
+    verbose_local = kwargs.pop("verbose", globals().get("verbose", False))
+    tol = kwargs.pop("tol", 1e-8)
+    max_iter = kwargs.pop("max_iter", 200)
+
+    # Extract blocks and active_blocks from kwargs
+    blocks = kwargs.pop("blocks", None)
+    active_blocks = kwargs.pop("active_blocks", None)
+
+    if blocks is None:
+        raise ValueError("solve_block_efficient requires 'blocks' in kwargs")
+
+    B, C, x, info = constrained_decomposition_block_efficient(
+        A=A,
+        blocks=blocks,
+        active_blocks=active_blocks,
+        tol=tol,
+        max_iter=max_iter,
+        verbose=verbose_local,
+        return_info=True,
+        log_prefix=log_prefix,
+    )
+    return {"B": B, "C": C, "x": x, "solver": "block-efficient", "info": info}
 
 
 
@@ -182,9 +214,9 @@ if __name__ == "__main__":
     globals()["verbose"] = bool(args.verbose or DEFAULT_VERBOSE)
 
     # ============================================================
-    # Cache demo3 build (for group-invariant solver)
+    # Cache demo3 build (for block-efficient solver)
     # ============================================================
-    _demo3_cache = {"built": False, "A": None, "basis": None, "group": None}
+    _demo3_cache = {"built": False, "A": None, "blocks": None, "active_blocks": None}
 
 
     def build_demo3_once():
@@ -200,26 +232,30 @@ if __name__ == "__main__":
                 cross_range=(2.0, 4.0),
             )
 
-            # Compute active_pairs: all block pairs except (0, k-1) which is constrained
-            k = len(blocks3)
-            all_pairs = [(a, b) for a in range(k) for b in range(a + 1, k)]
-            exclude = (0, k - 1) if k >= 2 else None
-            active_pairs = [p for p in all_pairs if p != exclude]
-
-            basis3 = make_block_support_basis_offdiag(args.n3, blocks3,
-                                                      active_pairs=active_pairs, active_within=True)
+            # Active blocks: all cross-blocks except (0, r-1), plus all diagonal blocks
+            # This matches the original: active_pairs + active_within=True
+            # - Cross blocks (i, j) with i < j: C can be nonzero
+            # - Diagonal blocks (i, i): C's off-diagonal within block can be nonzero
+            r = len(blocks3)
+            all_cross_blocks = [(i, j) for i in range(r) for j in range(i + 1, r)]
+            exclude = (0, r - 1) if r >= 2 else None
+            active_cross = [p for p in all_cross_blocks if p != exclude]
+            active_diag = [(i, i) for i in range(r)]  # all diagonal blocks
+            active_blocks = active_diag + active_cross
 
             _demo3_cache["A"] = A3
-            _demo3_cache["basis"] = basis3
-            _demo3_cache["group"] = {"blocks": blocks3}
+            _demo3_cache["blocks"] = blocks3
+            _demo3_cache["active_blocks"] = active_blocks
             _demo3_cache["built"] = True
 
-        return _demo3_cache["A"], _demo3_cache["basis"], _demo3_cache["group"]
+        return _demo3_cache["A"], _demo3_cache["blocks"], _demo3_cache["active_blocks"]
 
 
-    def build_demo3_full():
-        A3, basis3, group3 = build_demo3_once()
-        return A3, basis3, {"method": "newton", "group": group3}
+    def build_demo3_efficient():
+        """Build for efficient block-level solver (O(r³) per iteration)."""
+        A3, blocks3, active_blocks = build_demo3_once()
+        # No basis needed - solver works directly with block parameters
+        return A3, None, {"blocks": blocks3, "active_blocks": active_blocks}
 
 
     # ============================================================
@@ -278,20 +314,20 @@ if __name__ == "__main__":
         },
         {
             "name": "demo3_block_group",
-            "title": "Ex. III: Block-permutation invariant (group-reduced)",
+            "title": "Ex. III: Block-permutation invariant (block-efficient)",
             "paper_example": "III",
             "A_type": "block-exchangeable (r blocks)",
             "S_type": "G-invariant block-support subspace",
-            "solver": "primal-newton (group-reduced)",
-            "complexity": "O(n³ + Km_G²)",
-            "complexity_long": "O(n³) per iteration + O(m_G²) where m_G = dim(S^G) << m",
+            "solver": "block-efficient (O(r³) per iter)",
+            "complexity": "O(Kr³)",
+            "complexity_long": "O(r³) per iteration: works entirely in block-parameter space, never builds O(n²) basis",
             "get_dims": lambda n, basis, kwargs: {
                 "n": n,
-                "m": getattr(basis, 'm', '?'),
-                "r": len(kwargs.get('group', {}).get('blocks', [])),
+                "r": len(kwargs.get('blocks', [])),
+                "m_G": len(kwargs.get('active_blocks', [])),
             },
-            "build": build_demo3_full,
-            "solve": solve_primal,
+            "build": build_demo3_efficient,
+            "solve": solve_block_efficient,
             "plot_file": "demo3_block_group.png",
         },
         {

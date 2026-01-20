@@ -2921,6 +2921,367 @@ def constrained_decomposition_group_invariant(
 # Efficient block-direct solver (avoids O(n²) basis construction)
 # =============================================================================
 
+def block_constant_logdet_and_grad(d, o, c, block_sizes):
+    """
+    Compute log det(B) and gradients for block-constant SPD matrix B.
+
+    For block-constant B with r blocks:
+      - Block (i,i): diagonal = d[i], off-diagonal = o[i]
+      - Block (i,j) for i<j: constant = c[i,j]
+
+    The determinant factorizes as:
+      det(B) = prod_i (d[i] - o[i])^(n_i - 1) * det(M)
+
+    where M is r×r with:
+      M[i,i] = d[i] + (n_i - 1) * o[i]
+      M[i,j] = sqrt(n_i * n_j) * c[i,j]  for i != j
+
+    Returns: (log_det, grad_d, grad_o, grad_c, M, M_inv)
+    """
+    r = len(block_sizes)
+    n = block_sizes  # shorthand
+
+    # Build the r×r condensed matrix M
+    M = np.zeros((r, r))
+    for i in range(r):
+        M[i, i] = d[i] + (n[i] - 1) * o[i]
+        for j in range(i + 1, r):
+            M[i, j] = np.sqrt(n[i] * n[j]) * c[i, j]
+            M[j, i] = M[i, j]
+
+    # Compute log det
+    # log det(B) = sum_i (n_i - 1) * log(d_i - o_i) + log det(M)
+    try:
+        L_M = np.linalg.cholesky(M)
+        log_det_M = 2 * np.sum(np.log(np.diag(L_M)))
+    except np.linalg.LinAlgError:
+        return -np.inf, None, None, None, M, None
+
+    within_terms = np.array([n[i] - 1 for i in range(r)], dtype=float)
+    diff = d - o
+    if np.any(diff <= 0):
+        return -np.inf, None, None, None, M, None
+
+    log_det = np.sum(within_terms * np.log(diff)) + log_det_M
+
+    # Compute M_inv for gradients
+    M_inv = np.linalg.inv(M)
+
+    # Gradients
+    # ∂(log det)/∂d[i] = (n_i - 1)/(d_i - o_i) + M_inv[i,i]
+    grad_d = within_terms / diff + np.diag(M_inv)
+
+    # ∂(log det)/∂o[i] = -(n_i - 1)/(d_i - o_i) + (n_i - 1) * M_inv[i,i]
+    grad_o = -within_terms / diff + within_terms * np.diag(M_inv)
+
+    # ∂(log det)/∂c[i,j] = 2 * sqrt(n_i * n_j) * M_inv[i,j]  for i < j
+    grad_c = np.zeros((r, r))
+    for i in range(r):
+        for j in range(i + 1, r):
+            grad_c[i, j] = 2 * np.sqrt(n[i] * n[j]) * M_inv[i, j]
+
+    return log_det, grad_d, grad_o, grad_c, M, M_inv
+
+
+def block_constant_to_matrix(d, o, c, blocks):
+    """Convert block parameters to full n×n matrix."""
+    r = len(blocks)
+    n = sum(len(b) for b in blocks)
+    B = np.zeros((n, n))
+
+    for i, Ii in enumerate(blocks):
+        # Diagonal block
+        for a in Ii:
+            B[a, a] = d[i]
+            for b in Ii:
+                if a != b:
+                    B[a, b] = o[i]
+        # Off-diagonal blocks
+        for j in range(i + 1, r):
+            Ij = blocks[j]
+            for a in Ii:
+                for b in Ij:
+                    B[a, b] = c[i, j]
+                    B[b, a] = c[i, j]
+    return B
+
+
+def constrained_decomposition_block_efficient(
+    A,
+    blocks,
+    active_blocks=None,
+    tol=1e-8,
+    max_iter=100,
+    verbose=False,
+    return_info=False,
+    log_prefix="",
+):
+    """
+    Efficient solver for block-constant decomposition: O(r³) per iteration.
+
+    Works entirely in block-parameter space. Never builds O(n²) basis matrices.
+
+    Problem: Given A (block-constant SPD), find B (block-constant SPD) maximizing
+    log det(B) subject to C = A - B^{-1} being supported only on "active" blocks.
+
+    The key insight: parameterize C (not B) in the block-level basis, then
+    B^{-1} = A - C and we maximize log det(B) = -log det(B^{-1}).
+
+    Parameters
+    ----------
+    A : ndarray (n, n)
+        SPD block-constant matrix.
+    blocks : list of index arrays
+        Partition into r blocks.
+    active_blocks : list of (i, j) tuples, optional
+        Block positions (i, j) where C can be nonzero.
+        For diagonal blocks i=j, includes both diag and off-diag entries.
+        Default: all off-diagonal blocks (i, j) with i < j (no constraint on diagonal).
+
+    Returns
+    -------
+    B, C : ndarray (n, n)
+        Decomposition A = B^{-1} + C with:
+        - B block-constant SPD
+        - C block-constant, nonzero only on active_blocks
+    x : ndarray
+        Optimal coefficients in the block-level basis.
+    info : dict (if return_info=True)
+        Solver info including m_G = number of free parameters = O(r²).
+    """
+    A = np.asarray(A, dtype=float)
+    n = A.shape[0]
+    r = len(blocks)
+    block_sizes = np.array([len(b) for b in blocks])
+    pfx = log_prefix
+
+    # Extract A's block parameters
+    A_d = np.zeros(r)  # diagonal values within diagonal blocks
+    A_o = np.zeros(r)  # off-diagonal values within diagonal blocks
+    A_c = np.zeros((r, r))  # cross-block values
+
+    for i, Ii in enumerate(blocks):
+        Ii = np.asarray(Ii, dtype=int)
+        if len(Ii) > 0:
+            A_d[i] = np.mean([A[a, a] for a in Ii])
+            if len(Ii) > 1:
+                A_o[i] = np.mean([A[a, b] for a in Ii for b in Ii if a != b])
+        for j in range(i + 1, r):
+            Ij = np.asarray(blocks[j], dtype=int)
+            A_c[i, j] = np.mean(A[np.ix_(Ii, Ij)])
+            A_c[j, i] = A_c[i, j]
+
+    # Default active_blocks: all off-diagonal blocks (standard constraint for Demo III)
+    if active_blocks is None:
+        active_blocks = [(i, j) for i in range(r) for j in range(i + 1, r)]
+
+    # Normalize and categorize active blocks
+    active_set = set()
+    for (i, j) in active_blocks:
+        active_set.add((min(i, j), max(i, j)))
+
+    # Build the block-level basis for C ∈ S^G
+    # Each basis element E_k is represented by its block parameters (d_k, o_k, c_k)
+    # where most entries are zero except for one block position.
+    #
+    # Basis structure:
+    # - For active diagonal block (i,i): 1 basis element (off-diagonal within block only)
+    #   - E_offdiag[i]: o[i]=1, all else 0 (off-diagonal within block i)
+    #   - NOTE: we don't include diagonal entries - this matches active_within=True
+    # - For active cross block (i,j) with i<j: 1 basis element
+    #   - E_cross[i,j]: c[i,j]=1, all else 0
+
+    basis_specs = []  # list of (type, i, j) where type in ['offdiag', 'cross']
+    for (i, j) in sorted(active_set):
+        if i == j:
+            # Diagonal block: only off-diagonal entries (matching active_within=True)
+            if block_sizes[i] > 1:
+                basis_specs.append(('offdiag', i, i))
+        else:
+            basis_specs.append(('cross', i, j))
+
+    m_G = len(basis_specs)
+
+    if verbose:
+        n_offdiag = sum(1 for (t, i, j) in basis_specs if t == 'offdiag')
+        n_cross = sum(1 for (t, i, j) in basis_specs if t == 'cross')
+        print(f"{pfx}Block-efficient solver: n={n}, r={r}, m_G={m_G} "
+              f"(offdiag:{n_offdiag}, cross:{n_cross})")
+        print(f"{pfx}Active blocks: {sorted(active_set)}")
+
+    # Function to compute C's block parameters from x
+    def x_to_C_params(x):
+        """Convert basis coefficients x to C's block parameters (d_C, o_C, c_C)."""
+        d_C = np.zeros(r)  # Always zero (diagonal entries of C are not free)
+        o_C = np.zeros(r)
+        c_C = np.zeros((r, r))
+        for k, (btype, i, j) in enumerate(basis_specs):
+            if btype == 'offdiag':
+                o_C[i] += x[k]
+            else:  # cross
+                c_C[i, j] += x[k]
+                c_C[j, i] += x[k]
+        return d_C, o_C, c_C
+
+    # Function to compute objective and gradient
+    # Matches original: phi = -log det(B^{-1}) = log det(B)
+    # We MINIMIZE phi (like original constrained_decomposition)
+    def objective_and_grad(x):
+        """
+        Compute phi(x) = -log det(B^{-1}) = -log det(A - C) and gradient.
+
+        We MINIMIZE phi to match the original constrained_decomposition solver.
+        """
+        d_C, o_C, c_C = x_to_C_params(x)
+
+        # B^{-1} = A - C
+        d_Binv = A_d - d_C
+        o_Binv = A_o - o_C
+        c_Binv = A_c - c_C
+
+        # Compute log det(B^{-1}) and gradients
+        log_det_Binv, grad_d, grad_o, grad_c, M, M_inv = block_constant_logdet_and_grad(
+            d_Binv, o_Binv, c_Binv, block_sizes)
+
+        if log_det_Binv == -np.inf:
+            return np.inf, np.zeros(m_G)
+
+        # phi = -log det(B^{-1}) = log det(B)
+        phi = -log_det_Binv
+
+        # ∇phi w.r.t. x: chain rule
+        # ∂phi/∂x_k = -∂(log det(B^{-1}))/∂x_k = -[-(∂ log det / ∂c_{Binv})]
+        #           = ∂(log det B^{-1})/∂c_{Binv} * ∂c_{Binv}/∂x_k
+        # Since c_Binv = A_c - c_C and x increases c_C:
+        # ∂c_Binv/∂x_k = -1 for cross blocks
+        # So ∂phi/∂x_k = -∂(log det B^{-1})/∂c_Binv * (-1) = ∂(log det B^{-1})/∂c_Binv = grad_c
+        grad_x = np.zeros(m_G)
+        for k, (btype, i, j) in enumerate(basis_specs):
+            if btype == 'offdiag':
+                grad_x[k] = grad_o[i]  # tr(B * E_offdiag) where E is block basis
+            else:  # cross
+                grad_x[k] = grad_c[i, j]  # tr(B * E_cross)
+
+        return phi, grad_x
+
+    # Initialize x = 0 (C = 0, so B^{-1} = A, B = A^{-1})
+    x = np.zeros(m_G)
+
+    # Newton iteration with CG for solving the Newton system
+    iters_done = 0
+    backtracks = 0
+
+    for it in range(max_iter):
+        phi, grad = objective_and_grad(x)
+
+        if not np.isfinite(phi):
+            if verbose:
+                print(f"{pfx}iter {it}: B^{{-1}} not SPD, cannot proceed")
+            break
+
+        g_norm = np.max(np.abs(grad))
+
+        if verbose:
+            print(f"{pfx}iter {it:3d}  phi={phi:.6e}  max|∇|={g_norm:.3e}")
+
+        if g_norm < tol:
+            iters_done = it
+            break
+
+        # Compute Hessian numerically (reliable for small m_G)
+        # H[k,l] = (∂²f/∂x_k∂x_l)
+        eps = 1e-5
+        H = np.zeros((m_G, m_G))
+        for k in range(m_G):
+            x_plus = x.copy()
+            x_plus[k] += eps
+            _, grad_plus = objective_and_grad(x_plus)
+
+            x_minus = x.copy()
+            x_minus[k] -= eps
+            _, grad_minus = objective_and_grad(x_minus)
+
+            H[k, :] = (grad_plus - grad_minus) / (2 * eps)
+
+        # Symmetrize
+        H = 0.5 * (H + H.T)
+
+        # Regularize Hessian if needed
+        min_eig = np.min(np.linalg.eigvalsh(H))
+        if min_eig < 1e-6:
+            H += (1e-6 - min_eig + 1e-4) * np.eye(m_G)
+
+        # Solve Newton system: H @ dx = -grad
+        try:
+            dx = np.linalg.solve(H, -grad)
+        except np.linalg.LinAlgError:
+            dx = -grad  # Fall back to gradient descent
+
+        gTd = float(np.dot(grad, dx))
+
+        # Backtracking line search (same as original constrained_decomposition)
+        t = 1.0
+        accepted = False
+        for _ in range(60):  # max_backtracks=60
+            backtracks += 1
+            x_try = x + t * dx
+            phi_try, _ = objective_and_grad(x_try)
+
+            if not np.isfinite(phi_try):
+                t *= 0.5
+                continue
+
+            if phi_try <= phi + 1e-4 * t * gTd:  # Armijo condition
+                accepted = True
+                x = x_try
+                break
+            t *= 0.5
+
+        if not accepted:
+            if verbose:
+                print(f"{pfx}  backtracking failed at iter {it}")
+            break
+
+        iters_done = it + 1
+
+    # Final solution
+    d_C, o_C, c_C = x_to_C_params(x)
+    d_Binv = A_d - d_C
+    o_Binv = A_o - o_C
+    c_Binv = A_c - c_C
+
+    # Build full matrices
+    B_inv = block_constant_to_matrix(d_Binv, o_Binv, c_Binv, blocks)
+    B = np.linalg.inv(B_inv)
+    C = block_constant_to_matrix(d_C, o_C, c_C, blocks)
+
+    # Verify decomposition
+    C = A - B_inv  # Use exact relation
+    C = 0.5 * (C + C.T)
+
+    # Compute final gradient norm
+    phi_final, grad_final = objective_and_grad(x)
+    g_norm_final = np.max(np.abs(grad_final))
+
+    if verbose:
+        print(f"{pfx}Converged in {iters_done} iters, phi={phi_final:.6e}, "
+              f"final max|∇|={g_norm_final:.3e}")
+
+    if return_info:
+        info = {
+            "iters": iters_done,
+            "backtracks": backtracks,
+            "m_G": m_G,
+            "converged": g_norm_final < tol,
+            "final_grad_norm": g_norm_final,
+            "final_max_abs_trace": g_norm_final,  # for compatibility with other solvers
+            "active_blocks": sorted(active_set),
+        }
+        return B, C, x, info
+
+    return B, C, x
+
+
 def constrained_decomposition_block_direct(
     A,
     blocks,
@@ -2932,6 +3293,8 @@ def constrained_decomposition_block_direct(
     log_prefix="",
 ):
     """
+    [DEPRECATED - use constrained_decomposition_block_efficient instead]
+
     Efficient solver for block-constant decomposition.
 
     Directly parameterizes B by O(r²) block values instead of O(n²) entry-level basis.
