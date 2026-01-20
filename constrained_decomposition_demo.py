@@ -85,6 +85,35 @@ def solve_dual(A, basis, basis_perp=None, log_prefix="", **kwargs):
     return {"B": B, "C": C, "x": y, "solver": "dual", "basis_perp": basis_perp_out, "info": info}
 
 
+def solve_block_direct(A, basis, log_prefix="", **kwargs):
+    """
+    Efficient block-direct solver for Demo III.
+    Directly parameterizes B by O(r²) block values instead of using O(n²) basis.
+    """
+    verbose_local = kwargs.pop("verbose", globals().get("verbose", False))
+    tol = kwargs.pop("tol", 1e-6)  # Looser tolerance for faster convergence
+    max_iter = kwargs.pop("max_iter", 200)  # More iterations allowed
+
+    # Extract blocks and free_pairs from kwargs
+    blocks = kwargs.pop("blocks", None)
+    free_pairs = kwargs.pop("free_pairs", None)
+
+    if blocks is None:
+        raise ValueError("solve_block_direct requires 'blocks' in kwargs")
+
+    B, C, x, info = constrained_decomposition_block_direct(
+        A=A,
+        blocks=blocks,
+        free_pairs=free_pairs,
+        tol=tol,
+        max_iter=max_iter,
+        verbose=verbose_local,
+        return_info=True,
+        log_prefix=log_prefix,
+    )
+    return {"B": B, "C": C, "x": x, "solver": "block-direct", "info": info}
+
+
 
 if __name__ == "__main__":
     np.set_printoptions(precision=3, suppress=True)
@@ -153,9 +182,8 @@ if __name__ == "__main__":
     globals()["verbose"] = bool(args.verbose or DEFAULT_VERBOSE)
 
     # ============================================================
-    # Cache demo3 build (so we don't call make_block_fixed_spd twice)
+    # Cache demo3 build (for group-invariant solver)
     # ============================================================
-    # was: _demo3_cache = {"built": False, "A": None, "basis": None}
     _demo3_cache = {"built": False, "A": None, "basis": None, "group": None}
 
 
@@ -172,6 +200,7 @@ if __name__ == "__main__":
                 cross_range=(2.0, 4.0),
             )
 
+            # Compute active_pairs: all block pairs except (0, k-1) which is constrained
             k = len(blocks3)
             all_pairs = [(a, b) for a in range(k) for b in range(a + 1, k)]
             exclude = (0, k - 1) if k >= 2 else None
@@ -182,7 +211,7 @@ if __name__ == "__main__":
 
             _demo3_cache["A"] = A3
             _demo3_cache["basis"] = basis3
-            _demo3_cache["group"] = {"blocks": blocks3}  # <-- THIS is the key line
+            _demo3_cache["group"] = {"blocks": blocks3}
             _demo3_cache["built"] = True
 
         return _demo3_cache["A"], _demo3_cache["basis"], _demo3_cache["group"]
@@ -261,10 +290,7 @@ if __name__ == "__main__":
                 "m": getattr(basis, 'm', '?'),
                 "r": len(kwargs.get('group', {}).get('blocks', [])),
             },
-            "build": (lambda: (
-                (lambda A3, basis3, group3: (A3, basis3, {"method": "newton", "group": group3}))
-                (*build_demo3_once())
-            )),
+            "build": build_demo3_full,
             "solve": solve_primal,
             "plot_file": "demo3_block_group.png",
         },
@@ -391,6 +417,7 @@ if __name__ == "__main__":
             "grad_norm": grad_norm,
             "recon": recon,
             "max_trace": max_trace,
+            "info": info,  # Include solver info for m_G extraction
         })
 
         # plot (use basis_for_check so demo2 doesn't crash)
@@ -458,13 +485,14 @@ if __name__ == "__main__":
                 dims_list.append("---")
             else:
                 d = by_ex[ex]['dims']
+                info_ex = by_ex[ex].get('info', {})
                 if ex == 'I':
                     dims_list.append(f"$m={d.get('m', '?')}$")
                 elif ex == 'II':
                     dims_list.append(f"$m^\\perp={d.get('m⊥', '?')}$")
                 elif ex == 'III':
-                    # For group case, show m_G (reduced dim) - need to get from info
-                    m_G = by_ex[ex].get('info', {}).get('m_G', d.get('m', '?'))
+                    # For group-reduced, m_G is in solver info
+                    m_G = info_ex.get('m_G', d.get('m_G', d.get('m', '?')))
                     dims_list.append(f"$m_G={m_G}$")
                 elif ex == 'IV':
                     dims_list.append(f"$m={d.get('m', '?')}$,\\ $b={d.get('b', '?')}$")

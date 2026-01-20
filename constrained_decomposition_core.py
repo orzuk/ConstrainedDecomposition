@@ -2917,6 +2917,390 @@ def constrained_decomposition_group_invariant(
     raise ValueError("solver must be 'primal' or 'dual'.")
 
 
+# =============================================================================
+# Efficient block-direct solver (avoids O(n²) basis construction)
+# =============================================================================
+
+def constrained_decomposition_block_direct(
+    A,
+    blocks,
+    free_pairs=None,
+    tol=1e-8,
+    max_iter=100,
+    verbose=False,
+    return_info=False,
+    log_prefix="",
+):
+    """
+    Efficient solver for block-constant decomposition.
+
+    Directly parameterizes B by O(r²) block values instead of O(n²) entry-level basis.
+
+    For block-constant matrices:
+      - Diagonal block (i,i): has 2 parameters (diag value, offdiag value)
+      - Off-diagonal block (i,j): has 1 parameter (constant value)
+
+    Parameters
+    ----------
+    A : ndarray (n, n)
+        SPD matrix (must be block-constant w.r.t. blocks).
+    blocks : list of index arrays
+        Partition of {0, ..., n-1} into r blocks.
+    free_pairs : list of (i, j) tuples, optional
+        Block pairs (i, j) with i <= j where B can be nonzero.
+        Default: all pairs (full block-constant B).
+    tol : float
+        Convergence tolerance on max |gradient|.
+    max_iter : int
+        Maximum Newton iterations.
+    verbose : bool
+        Print iteration info.
+    return_info : bool
+        Return solver info dict.
+    log_prefix : str
+        Prefix for log messages.
+
+    Returns
+    -------
+    B, C : ndarray (n, n)
+        Decomposition A = B^{-1} + C with B block-constant.
+    info : dict (if return_info=True)
+        Solver statistics including m_G (number of free parameters).
+    """
+    A = np.asarray(A, dtype=float)
+    n = A.shape[0]
+    pfx = log_prefix
+
+    # Normalize blocks
+    blks = [np.asarray(I, dtype=int).ravel() for I in blocks]
+    r = len(blks)
+    block_sizes = [len(b) for b in blks]
+
+    # Default: all block pairs are free
+    if free_pairs is None:
+        free_pairs = [(i, j) for i in range(r) for j in range(i, r)]
+    free_pairs = [(min(i,j), max(i,j)) for (i,j) in free_pairs]
+    free_pairs = sorted(set(free_pairs))
+
+    # Build parameter list:
+    # - Diagonal blocks (i,i) with size > 1: 2 params (diag, offdiag)
+    # - Diagonal blocks (i,i) with size 1: 1 param (diag only)
+    # - Off-diagonal blocks (i,j): 1 param
+    param_specs = []  # list of (block_i, block_j, param_type)
+    # param_type: 'diag' for diagonal entries, 'offdiag' for within-block off-diag, 'cross' for cross-block
+    for (i, j) in free_pairs:
+        if i == j:
+            param_specs.append((i, j, 'diag'))  # diagonal entries of block
+            if block_sizes[i] > 1:
+                param_specs.append((i, j, 'offdiag'))  # off-diagonal entries of block
+        else:
+            param_specs.append((i, j, 'cross'))  # cross-block entries
+
+    m_G = len(param_specs)
+
+    if verbose:
+        n_diag_params = sum(1 for (i, j, t) in param_specs if t == 'diag')
+        n_offdiag_params = sum(1 for (i, j, t) in param_specs if t == 'offdiag')
+        n_cross_params = sum(1 for (i, j, t) in param_specs if t == 'cross')
+        print(f"{pfx}Block-direct solver: n={n}, r={r} blocks, m_G={m_G} params "
+              f"(diag:{n_diag_params}, offdiag:{n_offdiag_params}, cross:{n_cross_params})")
+
+    def params_to_B(x):
+        """Convert m_G parameters to n×n block-constant matrix B."""
+        B = np.zeros((n, n), dtype=float)
+        for k, (i, j, ptype) in enumerate(param_specs):
+            val = x[k]
+            Ii, Ij = blks[i], blks[j]
+            if ptype == 'diag':
+                # Set diagonal entries of block (i,i)
+                for idx in Ii:
+                    B[idx, idx] = val
+            elif ptype == 'offdiag':
+                # Set off-diagonal entries of block (i,i)
+                for idx1 in Ii:
+                    for idx2 in Ii:
+                        if idx1 != idx2:
+                            B[idx1, idx2] = val
+            else:  # 'cross'
+                # Set all entries in cross-block (i,j) and (j,i)
+                B[np.ix_(Ii, Ij)] = val
+                B[np.ix_(Ij, Ii)] = val
+        return B
+
+    def compute_phi_grad(x):
+        """Compute phi = -log det(B) and gradient w.r.t. block parameters."""
+        B = params_to_B(x)
+
+        # Check SPD
+        try:
+            L = np.linalg.cholesky(B)
+        except np.linalg.LinAlgError:
+            return np.inf, np.zeros(m_G), None
+
+        log_det = 2.0 * np.sum(np.log(np.diag(L)))
+        phi = -log_det
+
+        # B_inv via Cholesky
+        B_inv = sp_linalg.cho_solve((L, True), np.eye(n))
+
+        # Gradient: d(phi)/d(x_k) = -tr(B^{-1} dB/dx_k)
+        grad = np.zeros(m_G, dtype=float)
+        for k, (i, j, ptype) in enumerate(param_specs):
+            Ii, Ij = blks[i], blks[j]
+            if ptype == 'diag':
+                # dB/dx_k has 1s only on diagonal of block (i,i)
+                grad[k] = -np.trace(B_inv[np.ix_(Ii, Ii)])
+            elif ptype == 'offdiag':
+                # dB/dx_k has 1s on off-diagonal of block (i,i)
+                block_sum = np.sum(B_inv[np.ix_(Ii, Ii)])
+                diag_sum = np.trace(B_inv[np.ix_(Ii, Ii)])
+                grad[k] = -(block_sum - diag_sum)
+            else:  # 'cross'
+                # dB/dx_k has 1s in blocks (i,j) and (j,i)
+                grad[k] = -2.0 * np.sum(B_inv[np.ix_(Ii, Ij)])
+
+        return phi, grad, B_inv
+
+    def compute_hessian(B_inv):
+        """Compute Hessian of phi w.r.t. block parameters.
+
+        H[k,l] = tr(B^{-1} E_k B^{-1} E_l) where E_k = dB/dx_k
+
+        Uses vectorized computation for efficiency.
+        """
+        H = np.zeros((m_G, m_G), dtype=float)
+
+        # Precompute useful sums for each block
+        # B_inv_block[i,j] = B_inv[Ii, Ij] as submatrix
+        # We need various sums for the Hessian
+
+        for k, (ik, jk, ptypek) in enumerate(param_specs):
+            Iik = blks[ik]
+            Ijk = blks[jk]
+
+            # Compute column sums for E_k structure
+            # row_k[a] = sum_{b: E_k[a,b]=1} B_inv[a,b] -- this is actually not what we need
+            # We need: for each row a, the sum over columns b where E_k[b,c]=1 for some c
+            # H[k,l] = sum_{b,c,d,a} B_inv[a,b] E_k[b,c] B_inv[c,d] E_l[d,a]
+            #        = sum_{(b,c) in supp(E_k), (d,a) in supp(E_l)} B_inv[a,b] B_inv[c,d]
+
+            # For E_k, get the "row sums" and "column sums" of B_inv restricted to E_k's support
+            if ptypek == 'diag':
+                # E_k has 1s on diagonal of block ik: positions (i,i) for i in Iik
+                # sum over (b,c) in E_k: sum_i B_inv[:,i] * B_inv[i,:]
+                # Factor: (sum_i B_inv[:,i]) outer (sum_i B_inv[i,:]) but correlated
+                # = sum_i B_inv[:,i] * B_inv[i,:] which is B_inv[:, Iik] @ B_inv[Iik, :]
+                # Trace-like: sum_i B_inv[a,i] * B_inv[i,d] summed appropriately
+                pass
+            elif ptypek == 'offdiag':
+                pass
+            else:
+                pass
+
+            for l, (il, jl, ptypel) in enumerate(param_specs):
+                if l < k:
+                    H[k, l] = H[l, k]
+                    continue
+
+                Iil = blks[il]
+                Ijl = blks[jl]
+
+                # H[k,l] = sum_{(b,c) in E_k, (d,a) in E_l} B_inv[a,b] B_inv[c,d]
+                # This factors as: (sum over E_k support of B_inv cols) dot (sum over E_l support of B_inv rows)
+                # More precisely: sum_bc B_inv[:,b] * B_inv[c,:] for (b,c) in E_k support
+                # times sum_da B_inv[a,:] * B_inv[:,d] for (d,a) in E_l support
+
+                # Let S_k = sum_{(b,c) in E_k} e_b e_c^T (the E_k matrix itself)
+                # Then sum over E_k is tr(B_inv @ S_k) for the column part etc.
+
+                # Actually use: H[k,l] = (sum_b col_k_b) dot (sum_c row_k_c) properly indexed
+                # where col_k_b, row_k_c come from E_k support
+
+                # Compute col_sum_k = sum_{b: exists c with (b,c) in E_k} B_inv[:,b]
+                # And row_sum_k = sum_{c: exists b with (b,c) in E_k} B_inv[c,:]
+                # Then for E_l similarly
+
+                # Simplified: H[k,l] = (col_sum_k)^T @ (row_sum_l)
+                # where col_sum_k = sum over b-indices in E_k of B_inv[:,b]
+                # and row_sum_l = sum over a-indices in E_l of B_inv[a,:]
+
+                # Actually the formula is:
+                # H[k,l] = tr(B_inv @ E_k @ B_inv @ E_l)
+                # Let M_k = B_inv @ E_k, then H[k,l] = tr(M_k @ B_inv @ E_l) = sum_a (M_k @ B_inv)[a, a'] E_l[a', a]
+
+                # Efficient formula using outer products:
+                # E_k contributes: for (b,c) in supp(E_k), add B_inv[:,b] tensor B_inv[c,:]
+                # Then contract with E_l
+
+                # Use direct vectorized computation for small m_G
+                val = 0.0
+
+                # Build index arrays for E_k support
+                if ptypek == 'diag':
+                    bk_arr = np.array(Iik)
+                    ck_arr = np.array(Iik)
+                elif ptypek == 'offdiag':
+                    bk_list, ck_list = [], []
+                    for i in Iik:
+                        for j in Iik:
+                            if i != j:
+                                bk_list.append(i)
+                                ck_list.append(j)
+                    bk_arr = np.array(bk_list)
+                    ck_arr = np.array(ck_list)
+                else:  # 'cross'
+                    bk_list, ck_list = [], []
+                    for i in Iik:
+                        for j in Ijk:
+                            bk_list.extend([i, j])
+                            ck_list.extend([j, i])
+                    bk_arr = np.array(bk_list)
+                    ck_arr = np.array(ck_list)
+
+                if ptypel == 'diag':
+                    dl_arr = np.array(Iil)
+                    al_arr = np.array(Iil)
+                elif ptypel == 'offdiag':
+                    dl_list, al_list = [], []
+                    for i in Iil:
+                        for j in Iil:
+                            if i != j:
+                                dl_list.append(i)
+                                al_list.append(j)
+                    dl_arr = np.array(dl_list)
+                    al_arr = np.array(al_list)
+                else:  # 'cross'
+                    dl_list, al_list = [], []
+                    for i in Iil:
+                        for j in Ijl:
+                            dl_list.extend([i, j])
+                            al_list.extend([j, i])
+                    dl_arr = np.array(dl_list)
+                    al_arr = np.array(al_list)
+
+                # H[k,l] = sum_{(b,c) in E_k, (d,a) in E_l} B_inv[a,b] B_inv[c,d]
+                # = (sum over E_k indices: B_inv[:,bk]) . (sum over E_l indices: B_inv[al,:])
+                # crossed with (sum over E_k: B_inv[ck,:]) . (sum over E_l: B_inv[:,dl])
+
+                # Factor: sum_{b in bk} B_inv[:,b] dotted with sum_{a in al} B_inv[a,:]
+                # But we need the product structure
+
+                # Vectorized: B_inv[:, bk_arr].sum(axis=1) gives col sums
+                # B_inv[al_arr, :].sum(axis=0) gives row sums
+                # But the formula requires: sum over all pairs, so we need:
+                # val = sum_i sum_j B_inv[al_arr[j], bk_arr[i]] * B_inv[ck_arr[i], dl_arr[j]]
+
+                # Use outer product approach:
+                # M1[i,j] = B_inv[al_arr[j], bk_arr[i]]
+                # M2[i,j] = B_inv[ck_arr[i], dl_arr[j]]
+                # val = sum(M1 * M2)
+
+                M1 = B_inv[np.ix_(al_arr, bk_arr)].T  # shape (len_k, len_l)
+                M2 = B_inv[np.ix_(ck_arr, dl_arr)]    # shape (len_k, len_l)
+                val = np.sum(M1 * M2)
+
+                H[k, l] = val
+                if l > k:
+                    H[l, k] = val
+
+        return H
+
+    # Initialize: project A onto block-constant, extract block values
+    A_proj = block_reynolds_project(A, blks)
+    x = np.zeros(m_G, dtype=float)
+    for k, (i, j, ptype) in enumerate(param_specs):
+        Ii, Ij = blks[i], blks[j]
+        if ptype == 'diag':
+            # Mean of diagonal entries in block (i,i)
+            x[k] = np.mean([A_proj[idx, idx] for idx in Ii])
+        elif ptype == 'offdiag':
+            # Mean of off-diagonal entries in block (i,i)
+            if len(Ii) > 1:
+                offdiag_vals = [A_proj[a, b] for a in Ii for b in Ii if a != b]
+                x[k] = np.mean(offdiag_vals) if offdiag_vals else 0.0
+            else:
+                x[k] = 0.0
+        else:  # 'cross'
+            # Mean of entries in block (i,j)
+            x[k] = np.mean(A_proj[np.ix_(Ii, Ij)])
+
+    # Make sure initial B is SPD (shift if needed)
+    B_init = params_to_B(x)
+    try:
+        np.linalg.cholesky(B_init)
+    except np.linalg.LinAlgError:
+        # Add to diagonal parameters to make SPD
+        eigmin = np.linalg.eigvalsh(B_init).min()
+        shift = abs(eigmin) + 1.0
+        for k, (i, j, ptype) in enumerate(param_specs):
+            if ptype == 'diag':
+                x[k] += shift
+
+    # Newton iteration
+    phi, grad, B_inv = compute_phi_grad(x)
+    iters_done = 0
+    total_backtracks = 0
+
+    for it in range(max_iter):
+        g_norm = np.max(np.abs(grad))
+
+        if verbose:
+            print(f"{pfx}iter {it:4d}  phi={phi:.6e}  ||g||={np.linalg.norm(grad):.3e}  max|g|={g_norm:.3e}")
+
+        if g_norm < tol:
+            break
+
+        # Compute Hessian and Newton direction
+        H = compute_hessian(B_inv)
+        H += 1e-10 * np.eye(m_G)  # small regularization
+
+        try:
+            d = np.linalg.solve(H, -grad)
+        except np.linalg.LinAlgError:
+            d = -grad  # fall back to gradient descent
+
+        # Backtracking line search
+        alpha = 1.0
+        for bt in range(50):
+            x_new = x + alpha * d
+            phi_new, grad_new, B_inv_new = compute_phi_grad(x_new)
+            if phi_new < phi - 1e-4 * alpha * np.dot(grad, d):
+                break
+            alpha *= 0.5
+            total_backtracks += 1
+        else:
+            if verbose:
+                print(f"{pfx}Line search failed at iter {it}")
+            break
+
+        x = x_new
+        phi = phi_new
+        grad = grad_new
+        B_inv = B_inv_new
+        iters_done = it + 1
+
+    # Final B and C
+    B = params_to_B(x)
+    C = A - sp_linalg.inv(B)
+    C = 0.5 * (C + C.T)
+
+    if verbose:
+        g_norm = np.max(np.abs(grad))
+        print(f"{pfx}Converged in {iters_done} iters, max|g|={g_norm:.2e}")
+
+    if return_info:
+        info = {
+            "iters": iters_done,
+            "backtracks": total_backtracks,
+            "converged": np.max(np.abs(grad)) < tol,
+            "final_max_abs_grad": float(np.max(np.abs(grad))),
+            "m_G": m_G,
+        }
+        return B, C, x, info
+
+    return B, C, x
+
+
 def make_symmetric_first_col_from_half(half, n):
     half = np.asarray(half, dtype=float)  # length n//2+1 when n even
     if n % 2 == 0:
