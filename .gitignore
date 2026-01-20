@@ -29,3 +29,6 @@ slurm_jobs/*.err
 # OS
 .DS_Store
 Thumbs.db
+figs/
+results/
+demo_outputs/
