@@ -238,14 +238,14 @@ if __name__ == "__main__":
 
         A = np.zeros((n, n), dtype=float)
 
-        # Parameters chosen so diagonal stays at 1 (no shifting needed)
-        # and cross-blocks are clearly visible (18% of diagonal)
-        within_val = 0.08   # Small within-block correlation
-        cross_val = 0.18    # High cross-block (18% of diagonal)
-        diag_val = 1.0      # Fixed diagonal
+        # Varied diagonal per block allows higher cross-block values
+        # Pattern: [2, 3, 2, 3, 2] - alternating for visual interest
+        diag_vals = [2.0, 3.0, 2.0, 3.0, 2.0]
+        within_val = 0.15   # Within-block off-diagonal
+        cross_val = 0.5     # Cross-block (25% of min diagonal) - clearly visible!
 
         # Within-block off-diagonal
-        for blk in blocks:
+        for bi, blk in enumerate(blocks):
             for i in blk:
                 for j in blk:
                     if i != j:
@@ -259,9 +259,10 @@ if __name__ == "__main__":
                         A[i, j] = cross_val
                         A[j, i] = cross_val
 
-        # Fixed diagonal
-        for i in range(n):
-            A[i, i] = diag_val
+        # Varied diagonal per block
+        for bi, blk in enumerate(blocks):
+            for i in blk:
+                A[i, i] = diag_vals[bi]
 
         return A
 

@@ -174,26 +174,30 @@ def plot_block_decomposition(A, B, C, blocks, active_blocks=None,
     fig, axes = plt.subplots(2, 2, figsize=figsize)
 
     # SHARED colormap for A, C, B^{-1} (they represent the same values)
-    # Find global min/max across A, C, and B^{-1}
+    # Use vmin=0 so that 0 appears as white (inactive blocks in C)
     all_vals = np.concatenate([A.flatten(), C.flatten(), Binv.flatten()])
-    vmin_shared = np.min(all_vals)
+    vmin_shared = 0.0  # Force 0 to be white
     vmax_shared = np.max(all_vals)
 
     # B has its own colormap (different scale - precision matrix)
     vmin_B, vmax_B = np.min(B), np.max(B)
 
+    # Grayscale colormap: 0=white, higher=darker (more visible differences)
+    cmap_shared = 'gray_r'  # Reversed gray: white=0, black=max
+    line_color = 'red'      # Red lines visible on grayscale
+
     # Top-left: A (shared colormap)
     ax = axes[0, 0]
-    im = ax.imshow(A, cmap='viridis', aspect='equal', vmin=vmin_shared, vmax=vmax_shared)
+    im = ax.imshow(A, cmap=cmap_shared, aspect='equal', vmin=vmin_shared, vmax=vmax_shared)
     ax.set_title(r'$A$ (input)', fontsize=12)
-    add_block_lines(ax, color='white', linewidth=1.5)
+    add_block_lines(ax, color=line_color, linewidth=1.5)
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
     # Top-right: C (shared colormap, with inactive block highlighting)
     ax = axes[0, 1]
-    im = ax.imshow(C, cmap='viridis', aspect='equal', vmin=vmin_shared, vmax=vmax_shared)
+    im = ax.imshow(C, cmap=cmap_shared, aspect='equal', vmin=vmin_shared, vmax=vmax_shared)
     ax.set_title(r'$C \in S$ (block-constant, zero diagonal)', fontsize=12)
-    add_block_lines(ax, color='white', linewidth=1.5)
+    add_block_lines(ax, color=line_color, linewidth=1.5)
     highlight_inactive_blocks(ax, alpha=0.3)
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
@@ -206,9 +210,9 @@ def plot_block_decomposition(A, B, C, blocks, active_blocks=None,
 
     # Bottom-right: B^{-1} (shared colormap)
     ax = axes[1, 1]
-    im = ax.imshow(Binv, cmap='viridis', aspect='equal', vmin=vmin_shared, vmax=vmax_shared)
+    im = ax.imshow(Binv, cmap=cmap_shared, aspect='equal', vmin=vmin_shared, vmax=vmax_shared)
     ax.set_title(r'$B^{-1}$ (compensates where $C=0$)', fontsize=12)
-    add_block_lines(ax, color='white', linewidth=1.5)
+    add_block_lines(ax, color=line_color, linewidth=1.5)
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
     # Suptitle with key info
