@@ -208,10 +208,18 @@ def plot_block_decomposition(A, B, C, blocks, active_blocks=None,
     add_block_lines(ax, color='white', linewidth=1.5)
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
-    # Bottom-right: B^{-1} (shared colormap)
+    # Bottom-right: B^{-1} with colormap focused on OFF-DIAGONAL range
+    # This makes the active vs inactive cross-block difference visible
     ax = axes[1, 1]
-    im = ax.imshow(Binv, cmap=cmap_shared, aspect='equal', vmin=vmin_shared, vmax=vmax_shared)
-    ax.set_title(r'$B^{-1}$ (compensates where $C=0$)', fontsize=12)
+    # Get off-diagonal values only (exclude diagonal)
+    Binv_offdiag = Binv.copy()
+    np.fill_diagonal(Binv_offdiag, np.nan)
+    offdiag_min = np.nanmin(Binv_offdiag)
+    offdiag_max = np.nanmax(Binv_offdiag)
+    # Use focused range for better contrast in cross-blocks
+    im = ax.imshow(Binv, cmap=cmap_shared, aspect='equal',
+                   vmin=offdiag_min - 0.05, vmax=offdiag_max + 0.05)
+    ax.set_title(r'$B^{-1}$ (colormap: off-diag range)', fontsize=12)
     add_block_lines(ax, color=line_color, linewidth=1.5)
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
