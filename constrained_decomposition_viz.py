@@ -203,6 +203,22 @@ def plot_block_decomposition(A, B, C, blocks, active_blocks=None,
         add_block_lines(ax, color=line_color, linewidth=1.5)
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
+        # Mark zero cross-blocks in B^{-1} with 'o'
+        marker_color = 'red' if cmap == 'viridis' else 'blue'
+        for bi in range(r):
+            for bj in range(bi + 1, r):
+                blk_i, blk_j = blocks[bi], blocks[bj]
+                binv_block = Binv[np.ix_(blk_i, blk_j)]
+                if np.max(np.abs(binv_block)) < 1e-10:
+                    # This cross-block is zero - mark it
+                    row_center = (block_bounds[bi] + block_bounds[bi + 1] - 1) / 2
+                    col_center = (block_bounds[bj] + block_bounds[bj + 1] - 1) / 2
+                    ax.text(col_center, row_center, 'o', ha='center', va='center',
+                            fontsize=12, fontweight='bold', color=marker_color)
+                    # Symmetric block
+                    ax.text(row_center, col_center, 'o', ha='center', va='center',
+                            fontsize=12, fontweight='bold', color=marker_color)
+
         fig.suptitle(
             f'Block Decomposition: $A = B^{{-1}} + C$\n'
             f'$n={n}$, $r={r}$ blocks, '
