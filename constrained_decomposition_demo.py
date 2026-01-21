@@ -281,12 +281,15 @@ if __name__ == "__main__":
             # Build illustrative A
             A3 = build_demo3_illustrative_A(blocks3, seed=42)
 
-            # Active pattern: "band-1" in block space
-            # - Diagonal blocks (i, i): within-block off-diagonal active
-            # - Adjacent cross-blocks (i, i+1): active
-            # - Non-adjacent cross-blocks: INACTIVE (C=0 there, B^{-1} compensates)
+            # Active pattern: most blocks active, only 2 corners inactive
+            # - Diagonal blocks (i, i): all active
+            # - Most cross-blocks: active
+            # - Only corners (0, r-1) and (1, r-1) are INACTIVE
+            # Fewer inactive blocks -> stronger contrast in B^{-1}
             active_diag = [(i, i) for i in range(r)]
-            active_cross = [(i, i + 1) for i in range(r - 1)]  # Only adjacent pairs
+            all_cross = [(i, j) for i in range(r) for j in range(i + 1, r)]
+            inactive_cross = [(0, r - 1), (1, r - 1)]  # Just 2 corners inactive
+            active_cross = [p for p in all_cross if p not in inactive_cross]
             active_blocks = active_diag + active_cross
 
             _demo3_cache["A"] = A3
