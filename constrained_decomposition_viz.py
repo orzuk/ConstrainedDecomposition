@@ -102,7 +102,8 @@ def plot_decomposition_heatmaps(A, B, C, basis, add_title=True, out_file=None, s
 
 
 def plot_block_decomposition(A, B, C, blocks, active_blocks=None,
-                              out_file=None, show=False, figsize=(12, 8)):
+                              out_file=None, show=False, figsize=(12, 8),
+                              show_title=True):
     """
     Plot block-structured decomposition with clear visualization.
     Creates TWO versions: grayscale and colored, saved to separate files.
@@ -121,6 +122,8 @@ def plot_block_decomposition(A, B, C, blocks, active_blocks=None,
         Whether to display the figure
     figsize : tuple
         Figure size
+    show_title : bool
+        Whether to show the suptitle (default True)
     """
     A = np.asarray(A, dtype=float)
     B = np.asarray(B, dtype=float)
@@ -219,14 +222,17 @@ def plot_block_decomposition(A, B, C, blocks, active_blocks=None,
                     ax.text(row_center, col_center, 'o', ha='center', va='center',
                             fontsize=12, fontweight='bold', color=marker_color)
 
-        fig.suptitle(
-            f'Block Decomposition: $A = B^{{-1}} + C$\n'
-            f'$n={n}$, $r={r}$ blocks, '
-            f'active: {n_active}/{n_total}, '
-            f'$\\|A-(B^{{-1}}+C)\\|_F = {err:.2e}$',
-            fontsize=11
-        )
-        plt.tight_layout(rect=[0, 0, 1, 0.93])
+        if show_title:
+            fig.suptitle(
+                f'Block Decomposition: $A = B^{{-1}} + C$\n'
+                f'$n={n}$, $r={r}$ blocks, '
+                f'active: {n_active}/{n_total}, '
+                f'$\\|A-(B^{{-1}}+C)\\|_F = {err:.2e}$',
+                fontsize=11
+            )
+            plt.tight_layout(rect=[0, 0, 1, 0.93])
+        else:
+            plt.tight_layout()
 
         if out_file is not None:
             base = out_file.rsplit('.', 1)[0]

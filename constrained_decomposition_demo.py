@@ -514,7 +514,8 @@ if __name__ == "__main__":
                 blocks=solver_kwargs.get("blocks", []),
                 active_blocks=solver_kwargs.get("active_blocks", None),
                 out_file=plot_path,
-                figsize=(12, 9)
+                figsize=(10, 8),
+                show_title=False
             )
         else:
             plot_decomposition_heatmaps(
