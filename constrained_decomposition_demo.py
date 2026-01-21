@@ -246,24 +246,16 @@ if __name__ == "__main__":
                     if i != j:
                         A[i, j] = within_val
 
-        # Cross-block values: distinguish active vs inactive
-        # Active (adjacent): LARGER value (C will absorb most of this)
-        # Inactive (non-adjacent): moderate value (B^{-1} must cover ALL of this)
-        # IMPORTANT: No values close to zero for clear visualization
+        # Cross-block values: ALL cross-blocks have the SAME high value
+        # This clearly demonstrates: A has uniform structure, but decomposition
+        # assigns some to C (active) and some to B^{-1} (inactive)
+        cross_block_val = 0.7  # High, clearly visible in heatmap
         for bi in range(r):
             for bj in range(bi + 1, r):
-                is_adjacent = (bj == bi + 1)
-                if is_adjacent:
-                    # Active: larger cross-block (C will have visible contribution)
-                    val = 0.8
-                else:
-                    # Inactive: moderate cross-block (B^{-1} provides all of this)
-                    val = 0.5
-
                 for i in blocks[bi]:
                     for j in blocks[bj]:
-                        A[i, j] = val
-                        A[j, i] = val
+                        A[i, j] = cross_block_val
+                        A[j, i] = cross_block_val
 
         # Set diagonal to a uniform value, then shift eigenvalues for SPD
         # This keeps diagonal comparable to off-diagonal values
