@@ -169,6 +169,26 @@ def plot_block_decomposition(A, B, C, blocks, active_blocks=None,
         add_block_lines(ax, color=line_color, linewidth=1.5)
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
+        # Mark inactive blocks with '*' in C heatmap
+        if active_blocks is not None:
+            all_blocks_set = set()
+            for i in range(r):
+                for j in range(i, r):
+                    all_blocks_set.add((i, j))
+            active_set = set(active_blocks)
+            inactive_blocks = all_blocks_set - active_set
+            for (bi, bj) in inactive_blocks:
+                # Compute center of block (bi, bj)
+                row_center = (block_bounds[bi] + block_bounds[bi + 1] - 1) / 2
+                col_center = (block_bounds[bj] + block_bounds[bj + 1] - 1) / 2
+                marker_color = 'red' if cmap == 'viridis' else 'blue'
+                ax.text(col_center, row_center, '*', ha='center', va='center',
+                        fontsize=16, fontweight='bold', color=marker_color)
+                # Also mark symmetric block if off-diagonal
+                if bi != bj:
+                    ax.text(row_center, col_center, '*', ha='center', va='center',
+                            fontsize=16, fontweight='bold', color=marker_color)
+
         # Bottom-left: B (own colorbar)
         ax = axes[1, 0]
         im = ax.imshow(B, cmap=cmap, aspect='equal', vmin=vmin_B, vmax=vmax_B)
