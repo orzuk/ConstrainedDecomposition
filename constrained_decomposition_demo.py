@@ -238,36 +238,30 @@ if __name__ == "__main__":
 
         A = np.zeros((n, n), dtype=float)
 
-        # Within-block off-diagonal: moderate positive (will be in C)
-        within_val = 0.5
+        # Parameters chosen so diagonal stays at 1 (no shifting needed)
+        # and cross-blocks are clearly visible (18% of diagonal)
+        within_val = 0.08   # Small within-block correlation
+        cross_val = 0.18    # High cross-block (18% of diagonal)
+        diag_val = 1.0      # Fixed diagonal
+
+        # Within-block off-diagonal
         for blk in blocks:
             for i in blk:
                 for j in blk:
                     if i != j:
                         A[i, j] = within_val
 
-        # Cross-block values: ALL cross-blocks have the SAME high value
-        # This clearly demonstrates: A has uniform structure, but decomposition
-        # assigns some to C (active) and some to B^{-1} (inactive)
-        cross_block_val = 0.7  # High, clearly visible in heatmap
+        # Cross-block values: ALL cross-blocks have the SAME value
         for bi in range(r):
             for bj in range(bi + 1, r):
                 for i in blocks[bi]:
                     for j in blocks[bj]:
-                        A[i, j] = cross_block_val
-                        A[j, i] = cross_block_val
+                        A[i, j] = cross_val
+                        A[j, i] = cross_val
 
-        # Set diagonal to a uniform value, then shift eigenvalues for SPD
-        # This keeps diagonal comparable to off-diagonal values
+        # Fixed diagonal
         for i in range(n):
-            A[i, i] = 1.0  # Start with uniform diagonal
-
-        # Shift eigenvalues to make SPD with a small margin
-        eigvals = np.linalg.eigvalsh(A)
-        min_eig = eigvals[0]
-        if min_eig < 0.5:
-            shift = 0.5 - min_eig + 0.1
-            A = A + shift * np.eye(n)
+            A[i, i] = diag_val
 
         return A
 
