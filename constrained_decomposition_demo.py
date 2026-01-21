@@ -13,7 +13,7 @@ import numpy as np
 from constrained_decomposition_core import *
 from constrained_decomposition_matrices import *
 
-from constrained_decomposition_viz import plot_decomposition_heatmaps
+from constrained_decomposition_viz import plot_decomposition_heatmaps, plot_block_decomposition
 
 
 def time_solve(solve_fn, A, basis, **kwargs):
@@ -219,28 +219,87 @@ if __name__ == "__main__":
     _demo3_cache = {"built": False, "A": None, "blocks": None, "active_blocks": None}
 
 
+    def build_demo3_illustrative_A(blocks, seed=42):
+        """
+        Build a block-constant SPD matrix A for Demo III that produces
+        a visually clear heatmap:
+        - Diagonal entries comparable to off-diagonal (not dominating)
+        - Strong cross-block values where C will be INACTIVE (so B^{-1} must cover them)
+        - Moderate cross-block values where C will be ACTIVE
+        - Clear block structure visible in heatmap
+
+        For 5 blocks with "band-1" active pattern:
+        - Active cross-blocks: (0,1), (1,2), (2,3), (3,4) - adjacent pairs
+        - Inactive cross-blocks: (0,2), (0,3), (0,4), (1,3), (1,4), (2,4)
+        """
+        rng = np.random.default_rng(seed)
+        n = sum(len(blk) for blk in blocks)
+        r = len(blocks)
+
+        A = np.zeros((n, n), dtype=float)
+
+        # Within-block off-diagonal: moderate positive (will be in C)
+        within_val = 0.5
+        for blk in blocks:
+            for i in blk:
+                for j in blk:
+                    if i != j:
+                        A[i, j] = within_val
+
+        # Cross-block values: distinguish active vs inactive
+        # Active (adjacent): LARGER value (C will absorb most of this)
+        # Inactive (non-adjacent): moderate value (B^{-1} must cover ALL of this)
+        # IMPORTANT: No values close to zero for clear visualization
+        for bi in range(r):
+            for bj in range(bi + 1, r):
+                is_adjacent = (bj == bi + 1)
+                if is_adjacent:
+                    # Active: larger cross-block (C will have visible contribution)
+                    val = 0.8
+                else:
+                    # Inactive: moderate cross-block (B^{-1} provides all of this)
+                    val = 0.5
+
+                for i in blocks[bi]:
+                    for j in blocks[bj]:
+                        A[i, j] = val
+                        A[j, i] = val
+
+        # Set diagonal to a uniform value, then shift eigenvalues for SPD
+        # This keeps diagonal comparable to off-diagonal values
+        for i in range(n):
+            A[i, i] = 1.0  # Start with uniform diagonal
+
+        # Shift eigenvalues to make SPD with a small margin
+        eigvals = np.linalg.eigvalsh(A)
+        min_eig = eigvals[0]
+        if min_eig < 0.5:
+            shift = 0.5 - min_eig + 0.1
+            A = A + shift * np.eye(n)
+
+        return A
+
+
     def build_demo3_once():
         if not _demo3_cache["built"]:
-            blocks3 = make_blocks_variable(args.n3, r=args.blocks, seed=2)
+            # Use 5 blocks with equal sizes for clean visualization
+            r = 5
+            block_size = args.n3 // r
+            blocks3 = [list(range(i * block_size, (i + 1) * block_size)) for i in range(r)]
+            # Handle remainder
+            remainder = args.n3 - r * block_size
+            if remainder > 0:
+                blocks3[-1].extend(range(r * block_size, args.n3))
 
-            A3, params3 = make_block_constant_spd(
-                blocks3,
-                seed=3,
-                diag_margin=1.0,
-                diag_range=(6.0, 10.0),
-                within_range=(0.2, 0.8),
-                cross_range=(2.0, 4.0),
-            )
+            # Build illustrative A
+            A3 = build_demo3_illustrative_A(blocks3, seed=42)
 
-            # Active blocks: all cross-blocks except (0, r-1), plus all diagonal blocks
-            # This matches the original: active_pairs + active_within=True
-            # - Cross blocks (i, j) with i < j: C can be nonzero
-            # - Diagonal blocks (i, i): C's off-diagonal within block can be nonzero
-            r = len(blocks3)
-            all_cross_blocks = [(i, j) for i in range(r) for j in range(i + 1, r)]
-            exclude = (0, r - 1) if r >= 2 else None
-            active_cross = [p for p in all_cross_blocks if p != exclude]
-            active_diag = [(i, i) for i in range(r)]  # all diagonal blocks
+            # Active pattern: "band-1" in block space
+            # - Diagonal blocks (i, i): within-block off-diagonal active
+            # - Adjacent cross-blocks (i, i+1): active
+            # - Non-adjacent cross-blocks: INACTIVE (C=0 there, B^{-1} compensates)
+            active_diag = [(i, i) for i in range(r)]
+            active_cross = [(i, i + 1) for i in range(r - 1)]  # Only adjacent pairs
             active_blocks = active_diag + active_cross
 
             _demo3_cache["A"] = A3
@@ -456,14 +515,24 @@ if __name__ == "__main__":
             "info": info,  # Include solver info for m_G extraction
         })
 
-        # plot (use basis_for_check so demo2 doesn't crash)
+        # Plot (use specialized plotting for demo3, generic for others)
         plot_path = os.path.join(outdir, spec["plot_file"])
-        plot_decomposition_heatmaps(
-            A, B, C, basis_for_check,
-            out_file=plot_path,
-            add_title=True,
-            residual_on=residual_on
-        )
+        if spec["name"] == "demo3_block_group":
+            # Use specialized block visualization with boundaries and active/inactive highlighting
+            plot_block_decomposition(
+                A, B, C,
+                blocks=solver_kwargs.get("blocks", []),
+                active_blocks=solver_kwargs.get("active_blocks", None),
+                out_file=plot_path,
+                figsize=(12, 9)
+            )
+        else:
+            plot_decomposition_heatmaps(
+                A, B, C, basis_for_check,
+                out_file=plot_path,
+                add_title=True,
+                residual_on=residual_on
+            )
         print(f"  Plot saved: {plot_path}")
 
     # ============================================================
