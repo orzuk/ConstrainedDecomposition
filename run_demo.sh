@@ -102,5 +102,5 @@ else
         --output="$WORKDIR/$SLURM_DIR/demo_n${N}${JOB_SUFFIX}_%j.log" \
         --error="$WORKDIR/$SLURM_DIR/demo_n${N}${JOB_SUFFIX}_%j.err" \
         --job-name="demo_n${N}${JOB_SUFFIX}" \
-        --wrap=". $VENV && cd $WORKDIR && git pull && $CMD"
+        --wrap="bash -c 'source $VENV && cd $WORKDIR && git pull --ff-only || true && $CMD'"
 fi
