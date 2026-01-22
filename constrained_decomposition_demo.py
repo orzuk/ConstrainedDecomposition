@@ -123,7 +123,7 @@ def solve_block_efficient(A, basis, log_prefix="", **kwargs):
         active_blocks: list of (i, j) tuples where C can be nonzero
     """
     verbose_local = kwargs.pop("verbose", globals().get("verbose", False))
-    tol = kwargs.pop("tol", 1e-8)
+    tol = kwargs.pop("tol", 1e-7)
     max_iter = kwargs.pop("max_iter", 200)
 
     # Extract blocks and active_blocks from kwargs
