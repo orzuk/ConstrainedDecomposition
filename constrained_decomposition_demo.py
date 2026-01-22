@@ -506,7 +506,9 @@ if __name__ == "__main__":
         })
 
         # Plot (use specialized plotting for demo3, generic for others)
-        plot_path = os.path.join(outdir, spec["plot_file"])
+        # Include n in filename so different runs don't overwrite each other
+        base, ext = os.path.splitext(spec["plot_file"])
+        plot_path = os.path.join(outdir, f"{base}_n{n}{ext}")
         if spec["name"] == "demo3_block_group":
             # Use specialized block visualization with boundaries and active/inactive highlighting
             plot_block_decomposition(
