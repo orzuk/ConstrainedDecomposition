@@ -286,14 +286,24 @@ if __name__ == "__main__":
 
     def build_demo3_once():
         if not _demo3_cache["built"]:
-            # Use 5 blocks with equal sizes for clean visualization
+            # Use 5 blocks with slightly unequal sizes to avoid numerical degeneracy
+            # (Perfect symmetry when all blocks equal causes ill-conditioned Hessian)
             r = 5
-            block_size = args.n3 // r
-            blocks3 = [list(range(i * block_size, (i + 1) * block_size)) for i in range(r)]
-            # Handle remainder
-            remainder = args.n3 - r * block_size
-            if remainder > 0:
-                blocks3[-1].extend(range(r * block_size, args.n3))
+            base_size = args.n3 // r
+            remainder = args.n3 % r
+            block_sizes = [base_size] * r
+            # Distribute remainder to first blocks
+            for i in range(remainder):
+                block_sizes[i] += 1
+            # If perfectly divisible, break symmetry: first block +1, last block -1
+            if remainder == 0 and base_size > 1:
+                block_sizes[0] += 1
+                block_sizes[-1] -= 1
+            blocks3 = []
+            start = 0
+            for sz in block_sizes:
+                blocks3.append(list(range(start, start + sz)))
+                start += sz
 
             # Build illustrative A
             A3 = build_demo3_illustrative_A(blocks3, seed=42)
