@@ -72,5 +72,5 @@ else
         --output="$WORKDIR/$SLURM_DIR/demo_n${N}_%j.log" \
         --error="$WORKDIR/$SLURM_DIR/demo_n${N}_%j.err" \
         --job-name="demo_n${N}" \
-        --wrap="source $VENV && cd $WORKDIR && git pull && $CMD"
+        --wrap=". $VENV && cd $WORKDIR && git pull && $CMD"
 fi
