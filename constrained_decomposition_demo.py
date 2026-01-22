@@ -373,7 +373,7 @@ if __name__ == "__main__":
             "build": lambda: (
                 make_random_spd(args.n2, seed=1),
                 None,  # huge S not materialized
-                {"basis_perp": make_banded_basis(args.n2, b=args.bandwidth2, include_diag=True)},
+                {"basis_perp": make_banded_basis_coo(args.n2, b=args.bandwidth2, include_diag=True)},
             ),
             "solve": solve_dual,
             "plot_file": "demo2_dual_antibanded.png",
