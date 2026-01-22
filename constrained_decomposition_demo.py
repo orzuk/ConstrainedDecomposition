@@ -231,18 +231,34 @@ if __name__ == "__main__":
         For 5 blocks with "band-1" active pattern:
         - Active cross-blocks: (0,1), (1,2), (2,3), (3,4) - adjacent pairs
         - Inactive cross-blocks: (0,2), (0,3), (0,4), (1,3), (1,4), (2,4)
+
+        The values are scaled based on block sizes to ensure SPD for any n.
         """
         rng = np.random.default_rng(seed)
         n = sum(len(blk) for blk in blocks)
         r = len(blocks)
+        block_sizes = [len(blk) for blk in blocks]
+        max_block_size = max(block_sizes)
 
         A = np.zeros((n, n), dtype=float)
 
-        # Varied diagonal per block allows higher cross-block values
-        # Pattern: [2, 3, 2, 3, 2] - alternating for visual interest
-        diag_vals = [2.0, 3.0, 2.0, 3.0, 2.0]
-        within_val = 0.15   # Within-block off-diagonal
-        cross_val = 0.5     # Cross-block (25% of min diagonal) - clearly visible!
+        # Scale values based on block sizes to ensure diagonal dominance (SPD)
+        # For row i in block bi:
+        #   off-diag sum = (block_sizes[bi] - 1) * within_val + sum_{bj != bi} block_sizes[bj] * cross_val
+        # We need diagonal > off-diag sum with margin
+
+        # Use relative values that scale with n
+        # Target: within_val and cross_val should be small relative to diagonal
+        total_other_blocks = n - max_block_size  # max cross-block contribution
+        within_contrib = max_block_size - 1  # max within-block contribution
+
+        # Set values so off-diagonal sum is ~50% of diagonal (visually clear but SPD)
+        base_diag = 1.0
+        within_val = 0.1 * base_diag / max(within_contrib, 1)  # ~10% from within-block
+        cross_val = 0.3 * base_diag / max(total_other_blocks, 1)  # ~30% from cross-blocks
+
+        # Varied diagonal per block for visual interest
+        diag_multipliers = [1.0, 1.2, 1.0, 1.2, 1.0]
 
         # Within-block off-diagonal
         for bi, blk in enumerate(blocks):
@@ -259,10 +275,11 @@ if __name__ == "__main__":
                         A[i, j] = cross_val
                         A[j, i] = cross_val
 
-        # Varied diagonal per block
+        # Set diagonal with variation and margin for SPD
         for bi, blk in enumerate(blocks):
+            mult = diag_multipliers[bi] if bi < len(diag_multipliers) else 1.0
             for i in blk:
-                A[i, i] = diag_vals[bi]
+                A[i, i] = base_diag * mult
 
         return A
 
