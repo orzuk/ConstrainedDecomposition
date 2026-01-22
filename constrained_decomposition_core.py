@@ -2230,8 +2230,53 @@ def _find_feasible_dual_start(A, basis_perp: SymBasis, tries=30, jitter=1e-6, rn
     """
     A = np.asarray(A, dtype=float)
     n = A.shape[0]
+    p = basis_perp.m
     rng = np.random.default_rng() if rng is None else rng
 
+    # For sparse (COO) basis with many elements, use a simpler approach
+    # that doesn't require materializing all dense matrices
+    if basis_perp._coo is not None and p > 500:
+        # Simple heuristic: use trace_with to project targets onto basis
+        # y_i = tr(E_i · T) gives approximate projection for orthonormal-ish basis
+        targets = [np.eye(n), spd_inverse(A)]
+        for T in targets:
+            T = 0.5 * (T + T.T)
+            y0 = basis_perp.trace_with(T)
+            # Try different scales
+            for scale in (1.0, 0.5, 2.0, 0.1, 10.0):
+                y_try = scale * y0
+                B0 = basis_perp.build_C(y_try)
+                B0 = 0.5 * (B0 + B0.T)
+                try:
+                    np.linalg.cholesky(B0)
+                    return y_try
+                except np.linalg.LinAlgError:
+                    # Try adding diagonal boost
+                    for boost in (0.1, 1.0, 10.0):
+                        y_boosted = y_try.copy()
+                        # Add to diagonal elements (first n elements for banded basis with diag)
+                        y_boosted[:min(n, p)] += boost
+                        B0 = basis_perp.build_C(y_boosted)
+                        B0 = 0.5 * (B0 + B0.T)
+                        try:
+                            np.linalg.cholesky(B0)
+                            return y_boosted
+                        except np.linalg.LinAlgError:
+                            pass
+        # Final fallback: random with diagonal dominance
+        for _ in range(tries):
+            y0 = rng.uniform(0.1, 1.0, p)
+            y0[:min(n, p)] *= 10  # boost diagonal
+            B0 = basis_perp.build_C(y0)
+            B0 = 0.5 * (B0 + B0.T)
+            try:
+                np.linalg.cholesky(B0)
+                return y0
+            except np.linalg.LinAlgError:
+                pass
+        raise RuntimeError("Could not find feasible starting point for dual (B(y) SPD).")
+
+    # Original approach for dense or small sparse basis
     # candidate targets to project onto span(E)
     targets = [np.eye(n), spd_inverse(A)]
     # add a few random SPD-ish targets
@@ -2242,7 +2287,18 @@ def _find_feasible_dual_start(A, basis_perp: SymBasis, tries=30, jitter=1e-6, rn
     # Since basis_perp is orthonormal-ish only if constructed by make_orthogonal...,
     # we solve least squares y minimizing ||B(y)-T||_F.
     # Build matrix of symvec(Ei) columns.
-    Emats = basis_perp._dense
+    # Handle both dense and COO basis representations
+    if basis_perp._dense is not None:
+        Emats = basis_perp._dense
+    elif basis_perp._coo is not None:
+        # Convert COO to dense matrices (only for small basis)
+        Emats = []
+        for (rows, cols, vals) in basis_perp._coo:
+            E = np.zeros((n, n), dtype=float)
+            E[rows, cols] += vals
+            Emats.append(E)
+    else:
+        raise ValueError("basis_perp has neither dense nor COO representation")
     V = np.stack([_sym_vec(E) for E in Emats], axis=1)  # (p_total, p)
     for T in targets:
         t = _sym_vec(0.5 * (T + T.T))
