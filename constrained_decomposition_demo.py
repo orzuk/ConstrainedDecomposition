@@ -366,14 +366,14 @@ if __name__ == "__main__":
             "paper_example": "II",
             "A_type": "dense_random_spd",
             "S_type": "anti-banded S (implicit); S⊥ banded",
-            "solver": "dual-newton",
-            "complexity": "O(n³ + K(m⊥)²)",
-            "complexity_long": "O(n³) per iteration (Cholesky) + O((m⊥)²) per Newton step",
+            "solver": "dual-newton-cg",
+            "complexity": "O(n³ + Km⊥n²)",
+            "complexity_long": "O(n³) per iteration (Cholesky) + O(m⊥n²) per CG iteration (Hessian-vec)",
             "get_dims": lambda n, basis, kwargs: {"n": n, "m⊥": getattr(kwargs.get('basis_perp'), 'm', '?')},
             "build": lambda: (
                 make_random_spd(args.n2, seed=1),
                 None,  # huge S not materialized
-                {"basis_perp": make_banded_basis_coo(args.n2, b=args.bandwidth2, include_diag=True)},
+                {"basis_perp": make_banded_basis_coo(args.n2, b=args.bandwidth2, include_diag=True), "method": "newton-cg"},
             ),
             "solve": solve_dual,
             "plot_file": "demo2_dual_antibanded.png",

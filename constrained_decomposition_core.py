@@ -2609,6 +2609,7 @@ def constrained_decomposition_dual(
     A,
     basis: SymBasis,
     basis_perp: SymBasis = None,
+    method="newton-cg",
     tol=1e-8,
     max_iter=300,
     initial_step=1.0,
@@ -2619,7 +2620,9 @@ def constrained_decomposition_dual(
     max_backtracks=60,
     atol_perp=1e-12,
     log_prefix="",
-    return_info=False
+    return_info=False,
+    cg_tol=1e-6,
+    cg_max_iter=200,
 ):
     r"""
     Dual Newton solver (mirrors constrained_decomposition for the primal).
@@ -2634,6 +2637,8 @@ def constrained_decomposition_dual(
       - basis_perp: optional SymBasis spanning S^\perp.
         If None, this implementation REQUIRES you to provide it explicitly
         (we do not auto-construct S^\perp from S).
+      - method: "newton" (explicit Hessian) or "newton-cg" (matrix-free, default)
+      - cg_tol, cg_max_iter: CG parameters for newton-cg method
 
     Output:
       (B, C, y, basis_perp) where:
@@ -2668,10 +2673,17 @@ def constrained_decomposition_dual(
             "is not implemented."
         )
 
+    if method not in ("newton", "newton-cg"):
+        raise ValueError("method must be 'newton' or 'newton-cg'")
+
+    use_cg = (method == "newton-cg")
+
     # Find feasible start y0
     y = _find_feasible_dual_start(A, basis_perp)
 
-    psi, g, H, B, Binv, L = _phi_grad_hess_dual(A, y, basis_perp, order=2)
+    # For newton-cg, we only need gradient (order=1); for newton, need Hessian (order=2)
+    hess_order = 1 if use_cg else 2
+    psi, g, H, B, Binv, L = _phi_grad_hess_dual(A, y, basis_perp, order=hess_order)
 
     total_backtracks = 0
     iters_done = 0
@@ -2689,20 +2701,38 @@ def constrained_decomposition_dual(
             break
 
         p = basis_perp.m
-
-        # Newton direction: (H+λI)d = -g
         lam = newton_damping
-        for _ in range(10):
-            try:
-                H_damped = H + lam * np.eye(p)
-                Lh = np.linalg.cholesky(H_damped)
-                ytmp = sp_linalg.solve_triangular(Lh, -g, lower=True)
-                d = sp_linalg.solve_triangular(Lh.T, ytmp, lower=False)
-                break
-            except np.linalg.LinAlgError:
-                lam = max(10.0 * lam, 1e-12)
+
+        if use_cg:
+            # Newton-CG: use Hessian-vector product without forming explicit Hessian
+            # Hv = basis_perp.trace_with(Binv @ Ev @ Binv) where Ev = basis_perp.build_C(v)
+            # This reuses hessvec_spd_from_B with Binv instead of B
+            def Hv(v):
+                return hessvec_spd_from_B(v, Binv, basis_perp)
+
+            def mv(v):
+                return Hv(v) + lam * np.asarray(v, dtype=float)
+
+            d, cg_info = cg_solve(mv, -g, tol=cg_tol, max_iter=min(cg_max_iter, max(10, p)))
+
+            if verbose:
+                print(f"{pfx}  [CG] iters={cg_info['iters']} converged={cg_info['converged']} rel_res={cg_info['rel_res']:.2e}")
+
+            if (not cg_info["converged"]) and (cg_info["rel_res"] > 1e-2):
+                d = -g
         else:
-            d = -g
+            # Explicit Hessian Newton direction: (H+λI)d = -g
+            for _ in range(10):
+                try:
+                    H_damped = H + lam * np.eye(p)
+                    Lh = np.linalg.cholesky(H_damped)
+                    ytmp = sp_linalg.solve_triangular(Lh, -g, lower=True)
+                    d = sp_linalg.solve_triangular(Lh.T, ytmp, lower=False)
+                    break
+                except np.linalg.LinAlgError:
+                    lam = max(10.0 * lam, 1e-12)
+            else:
+                d = -g
 
         gTd = float(g @ d)
         if gTd >= 0:
@@ -2731,7 +2761,7 @@ def constrained_decomposition_dual(
                 print(f"{pfx}[dual] Backtracking failed; stopping.")
             break
 
-        psi, g, H, B, Binv, L = _phi_grad_hess_dual(A, y_try, basis_perp, order=2)
+        psi, g, H, B, Binv, L = _phi_grad_hess_dual(A, y_try, basis_perp, order=hess_order)
         y = y_try
 
     # ------------------------------------------------------------------
