@@ -57,7 +57,7 @@ CMD="python constrained_decomposition_demo.py --all --verbose --n1 $N --n2 $N --
 
 if [ "$INTERACTIVE" = true ]; then
     echo "Running interactively with n=$N..."
-    source "$VENV"
+    . "$VENV"
     cd "$WORKDIR"
     git pull
     $CMD
