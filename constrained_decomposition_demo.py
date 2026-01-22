@@ -640,5 +640,18 @@ if __name__ == "__main__":
         print(row_grad)
         print(row_recon)
 
+        # Save LaTeX table to file
+        latex_content = "\n".join([row_n, row_dim, row_iters, row_time, row_grad, row_recon])
+        # Create filename with n values
+        n_values = f"n{args.n1}_{args.n2}_{args.n3}_{args.n4}"
+        latex_file = os.path.join(outdir, f"latex_table_{n_values}.tex")
+        with open(latex_file, "w") as f:
+            f.write("% LaTeX table rows for constrained decomposition demo\n")
+            f.write(f"% Parameters: n1={args.n1}, n2={args.n2}, n3={args.n3}, n4={args.n4}\n")
+            f.write("% Copy these rows into your table environment\n\n")
+            f.write(latex_content)
+            f.write("\n")
+        print(f"\nLaTeX table saved to: {latex_file}")
+
     if not any_ran:
         print("Nothing selected. Use --all or --run demo1_primal_smallS,...")
