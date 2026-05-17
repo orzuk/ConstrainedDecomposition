@@ -1,5 +1,5 @@
 """
-Triangular decomposition Lambda = L + U + U A L (a.k.a. twisted LU).
+Bilinear triangular decomposition Lambda = L + U + U A L (Dolinsky-Zuk 2026).
 
 Specialisation of the constrained inverse decomposition
     A^{-1} = Q^{-1} + C,    Q in S^perp,   C in S,
@@ -12,10 +12,13 @@ L lower triangular such that
 
     Lambda = L + U + U A L.
 
-Unlike the inverse decomposition (which always exists), this nonlinear
-"twisted" decomposition can fail to exist or fail to be unique exactly
-when the backward elimination algorithm below hits a zero pivot. This
-is analogous to LU without pivoting on a non-strongly-regular matrix.
+Unlike the inverse decomposition (which always exists, paper's Prop 1),
+this bilinear triangular decomposition (paper's Prop 2) can fail to
+exist or fail to be unique exactly when the backward elimination algorithm
+below hits a zero pivot. The pair (A, Lambda) is triangularly REGULAR when
+the decomposition exists, IRREGULAR (codimension-1 in the SPD cone) when
+not. The robust variant `backward_triangular_elimination_robust` returns
+the unique U from Prop 1 on the entire SPD cone in finite arithmetic.
 
 References
 ----------
@@ -44,14 +47,14 @@ class TriangularDecompositionInfo:
     """Diagnostic record for `backward_triangular_elimination`.
 
     U is *always* returned: when status == "ok" it is the U from the
-    elimination itself; when status == "no_twisted_L" the elimination
+    elimination itself; when status == "no_bilinear_L" the elimination
     has supplied a certificate that no lower-triangular L exists, but
     Proposition 1's U still exists and is computed via the iterative
     fallback so the finance theorem (Theorem 1) can still be applied.
     """
     status: str
-    # "ok"             : twisted decomposition computed; both U and L returned
-    # "no_twisted_L"   : zero scalar pivot pi_k; U returned, L is None
+    # "ok"             : bilinear triangular decomposition computed; both U and L returned
+    # "no_bilinear_L"  : zero scalar pivot pi_k; U returned, L is None
     failed_step: Optional[int] = None    # 1-based row index where pi_k=0 was hit
     pivot: Optional[float] = None
     detail: str = ""
@@ -132,7 +135,7 @@ def backward_triangular_elimination(
         if abs(pi_k) < tol:
             U_full, _ = _triangular_inverse_via_newton(A, Lambda)
             return U_full, None, TriangularDecompositionInfo(
-                status="no_twisted_L",
+                status="no_bilinear_L",
                 failed_step=k + 1,
                 pivot=pi_k,
                 detail=f"pi_k={pi_k:g}; U returned is Prop. 1's inverse-decomposition U.",
@@ -214,7 +217,7 @@ def backward_triangular_elimination_efficient(
             if abs(s_M) < tol:
                 U_full, _ = _triangular_inverse_via_newton(A, Lambda)
                 return U_full, None, TriangularDecompositionInfo(
-                    status="no_twisted_L", failed_step=k + 1, pivot=s_M,
+                    status="no_bilinear_L", failed_step=k + 1, pivot=s_M,
                     detail="Schur complement of (I + A_0 L_0) is singular; "
                            "U returned is Prop. 1's inverse-decomposition U.",
                 )
@@ -235,7 +238,7 @@ def backward_triangular_elimination_efficient(
             if abs(s_N) < tol:
                 U_full, _ = _triangular_inverse_via_newton(A, Lambda)
                 return U_full, None, TriangularDecompositionInfo(
-                    status="no_twisted_L", failed_step=k + 1, pivot=s_N,
+                    status="no_bilinear_L", failed_step=k + 1, pivot=s_N,
                     detail="Schur complement of (I + U_0 A_0) is singular; "
                            "U returned is Prop. 1's inverse-decomposition U.",
                 )
@@ -263,7 +266,7 @@ def backward_triangular_elimination_efficient(
         if abs(pi_k) < tol:
             U_full, _ = _triangular_inverse_via_newton(A, Lambda)
             return U_full, None, TriangularDecompositionInfo(
-                status="no_twisted_L", failed_step=k + 1, pivot=pi_k,
+                status="no_bilinear_L", failed_step=k + 1, pivot=pi_k,
                 detail=f"pi_k={pi_k:g}; U returned is Prop. 1's inverse-decomposition U.",
             )
 
@@ -273,6 +276,183 @@ def backward_triangular_elimination_efficient(
         L[J, k] = y
 
     return U, L, TriangularDecompositionInfo(status="ok")
+
+
+# -----------------------------------------------------------------------------
+# Robust variant: continue past zero pivots via Sherman-Morrison limit
+# -----------------------------------------------------------------------------
+
+def backward_triangular_elimination_robust(
+    A: np.ndarray,
+    Lambda: np.ndarray,
+    tol: float = 1e-10,
+) -> Tuple[np.ndarray, np.ndarray, dict]:
+    """
+    Robust backward triangular elimination that always returns the unique U.
+
+    Handles every SPD pair (A, Lambda) via rank-r Sherman-Morrison
+    corrections on BOTH the primal row solve and the dual K_0 solve.
+
+    Per step k, with J = {k+1, ..., n-1} and B the set of (j, v_j)
+    pairs from previous zero pivots (j in J, v_j the recorded rank-one
+    divergent direction):
+      Build V, E (J_size x |B cap J|): column i of V has v_i placed at
+      row p_i = j_i - k - 1; column i of E is e_{p_i}. Set A' = A_0 V.
+      Primal SM (paper eq. A.1): Solve M^T u = beta s.t. A'^T u = 0,
+                  with M = I + A_0 L_{J,J}.
+      Dual SM (paper eq. A.2): Solve [K_0^T; V^T] s = [A_0 u; 0]
+                  via augmented lstsq. Consistent because
+                  V^T(A_0 u) = (A_0 V)^T u = A'^T u = 0.
+      Compute pi_k = 1 + u^T alpha - s^T (U_0 alpha) and
+              L_kk = (lam - s^T beta) / pi_k.
+      L_{J,k}: direct in regular case; NaN in singular case
+              (entries are perturbation-dependent off the diagonal).
+      Bad pivot (S7-S9 in paper Algorithm 2): append (k, v_k=(1,-w)^T)
+              to B with w from constrained augmented solve.
+
+    Parameters
+    ----------
+    A      : (n, n) symmetric positive definite (transaction-cost matrix).
+    Lambda : (n, n) symmetric positive definite (precision matrix).
+    tol    : pivot tolerance for declaring a zero pivot.
+
+    Returns
+    -------
+    U : (n, n) ndarray
+        The unique Prop 1 strictly upper triangular U (always correct).
+    L : (n, n) ndarray
+        Bilinear triangular L. In the regular case L is the full Prop 2 factor.
+        In the singular case entries that diverge or are perturbation-
+        dependent are NaN-flagged; canonical entries (L_kk in particular)
+        are filled in via the dual SM scalars.
+    info : dict
+        - 'bad_pivots' : list of (k, pi_k) for each step that vanished
+        - 'num_bad'    : number of vanished pivots
+        - 'status'     : 'ok' or 'has_bad_pivots'
+    """
+    A = np.asarray(A, dtype=float)
+    Lambda = np.asarray(Lambda, dtype=float)
+    n = A.shape[0]
+    if A.shape != (n, n) or Lambda.shape != (n, n):
+        raise ValueError("A and Lambda must be square of the same size.")
+
+    U = np.zeros((n, n), dtype=float)
+    L = np.zeros((n, n), dtype=float)
+    bad_cols = []  # each: {'index': k, 'pi_k': float, 'direction': v_k}
+
+    if n == 0:
+        return U, L, {'bad_pivots': [], 'num_bad': 0, 'status': 'ok'}
+
+    L[n - 1, n - 1] = Lambda[n - 1, n - 1]
+
+    for k in range(n - 2, -1, -1):
+        J = np.arange(k + 1, n)
+        J_size = J.size
+        A0 = A[np.ix_(J, J)]
+        U0 = U[np.ix_(J, J)]
+        L0 = L[np.ix_(J, J)]
+        L0_finite = np.where(np.isnan(L0), 0.0, L0)
+        alpha = A[J, k]
+        beta = Lambda[J, k]
+        lam = float(Lambda[k, k])
+
+        # Build V_embed (J_size, r) and E_mat (J_size, r):
+        # V_embed columns are v_j embedded at row pos_j = j-(k+1) in J;
+        # E_mat columns are the indicator e_{pos_j} (unit vector at row pos_j).
+        # All bad indices are > current k, so all sit in J.
+        r = len(bad_cols)
+        if r > 0:
+            V_embed = np.zeros((J_size, r))
+            E_mat = np.zeros((J_size, r))
+            for i, b in enumerate(bad_cols):
+                j = b['index']
+                pos = j - (k + 1)
+                v_full = b['direction']
+                end = min(pos + len(v_full), J_size)
+                V_embed[pos:end, i] = v_full[: end - pos]
+                E_mat[pos, i] = 1.0
+        else:
+            V_embed = np.zeros((J_size, 0))
+            E_mat = np.zeros((J_size, 0))
+
+        # --- PRIMAL SM: solve M^T u = beta with A'^T u = 0 ---
+        # M(eps) = M_finite + sum_j alpha_j (A_0 v_j^embed) e_{pos_j}^T
+        # ==> (M^T + alpha E (A')^T) u = beta, alpha -> infinity
+        # ==> u = u_base - M^{-T} E (A'^T M^{-T} E)^{-1} A'^T u_base.
+        M_finite = np.eye(J_size) + A0 @ L0_finite
+        try:
+            u_base = np.linalg.solve(M_finite.T, beta)
+        except np.linalg.LinAlgError:
+            u_base, *_ = np.linalg.lstsq(M_finite.T, beta, rcond=None)
+
+        if r > 0:
+            A_prime = A0 @ V_embed  # (J_size, r)
+            try:
+                MtinvE = np.linalg.solve(M_finite.T, E_mat)
+            except np.linalg.LinAlgError:
+                MtinvE, *_ = np.linalg.lstsq(M_finite.T, E_mat, rcond=None)
+            denom = A_prime.T @ MtinvE  # (r, r)
+            try:
+                lhs = np.linalg.solve(denom, A_prime.T @ u_base)
+            except np.linalg.LinAlgError:
+                lhs, *_ = np.linalg.lstsq(denom, A_prime.T @ u_base, rcond=None)
+            u = u_base - MtinvE @ lhs
+        else:
+            u = u_base
+
+        U[k, J] = u
+
+        # --- DUAL SM: solve K_0^T s = A_0 u with V^T s = 0 ---
+        K0 = np.eye(J_size) + U0 @ A0
+        A0u = A0 @ u
+        if r > 0:
+            aug_K0T = np.vstack([K0.T, V_embed.T])
+            aug_rhs = np.concatenate([A0u, np.zeros(r)])
+            s, *_ = np.linalg.lstsq(aug_K0T, aug_rhs, rcond=None)
+        else:
+            try:
+                s = np.linalg.solve(K0.T, A0u)
+            except np.linalg.LinAlgError:
+                s, *_ = np.linalg.lstsq(K0.T, A0u, rcond=None)
+
+        # --- pi_k, L_kk via dual SM scalars ---
+        U0_alpha = U0 @ alpha
+        pi_k = 1.0 + float(u @ alpha) - float(s @ U0_alpha)
+
+        if abs(pi_k) < tol:
+            # Bad pivot. Compute v_k = (1, -w^T)^T via constrained K_0 w = U_0 alpha.
+            if r > 0:
+                aug_K0 = np.vstack([K0, V_embed.T])
+                aug_w_rhs = np.concatenate([U0_alpha, np.zeros(r)])
+                w, *_ = np.linalg.lstsq(aug_K0, aug_w_rhs, rcond=None)
+            else:
+                try:
+                    w = np.linalg.solve(K0, U0_alpha)
+                except np.linalg.LinAlgError:
+                    w, *_ = np.linalg.lstsq(K0, U0_alpha, rcond=None)
+            v_k = np.concatenate([[1.0], -w])
+            bad_cols.append({'index': k, 'pi_k': pi_k, 'direction': v_k})
+            L[k, k] = np.nan
+            L[J, k] = np.nan
+        else:
+            L_kk = (lam - float(s @ beta)) / pi_k
+            L[k, k] = L_kk
+            if r == 0:
+                # Regular subproblem: full L column.
+                z = np.linalg.solve(K0, beta)
+                w = np.linalg.solve(K0, U0_alpha)
+                L[J, k] = z - w * L_kk
+            else:
+                # Singular subproblem: off-diagonal entries are
+                # perturbation-dependent; flag as NaN.
+                L[J, k] = np.nan
+
+    info = {
+        'bad_pivots': [(b['index'], b['pi_k']) for b in bad_cols],
+        'num_bad': len(bad_cols),
+        'status': 'ok' if not bad_cols else 'has_bad_pivots',
+    }
+    return U, L, info
 
 
 # -----------------------------------------------------------------------------
@@ -295,7 +475,7 @@ def triangular_inverse_decomposition(
     Dolinsky-Zuk 2026).
 
     Strategy: try the direct backward elimination first. If it succeeds,
-    extract U from the twisted decomposition (the U is the same matrix).
+    extract U from the bilinear decomposition (the U is the same matrix).
     If the elimination hits a zero pivot, fall back to the iterative
     primal solver in `constrained_decomposition_core`.
     """
@@ -340,7 +520,7 @@ def _triangular_inverse_via_newton(A: np.ndarray, Lambda: np.ndarray):
 # Helpers
 # -----------------------------------------------------------------------------
 
-def twisted_residual(A: np.ndarray, Lambda: np.ndarray,
+def bilinear_residual(A: np.ndarray, Lambda: np.ndarray,
                      U: np.ndarray, L: np.ndarray) -> float:
     """Max absolute entry of Lambda - (L + U + U A L)."""
     return float(np.max(np.abs(Lambda - (L + U + U @ A @ L))))
@@ -378,7 +558,7 @@ def _demo_2x2():
     assert np.isclose(L[1, 0], q)
     print(f"  U[0,1]   = {U[0,1]:.6f}   (paper:  q/(1+cr)       = {U01_expected:.6f})")
     print(f"  L[0,0]   = {L[0,0]:.6f}   (paper:  ((1+cr)p-cq^2)/(1+cr+bq) = {L00_expected:.6f})")
-    print(f"  residual = {twisted_residual(A, Lam, U, L):.3e}")
+    print(f"  residual = {bilinear_residual(A, Lam, U, L):.3e}")
 
 
 def _demo_n1():
@@ -391,7 +571,7 @@ def _demo_n1():
     assert info.status == "ok"
     assert U.shape == (1, 1) and U[0, 0] == 0.0
     assert np.isclose(L[0, 0], Lam[0, 0])
-    print(f"  U = {U}, L = {L}, residual = {twisted_residual(A, Lam, U, L):.3e}")
+    print(f"  U = {U}, L = {L}, residual = {bilinear_residual(A, Lam, U, L):.3e}")
 
 
 def _demo_random(n: int = 12, seed: int = 0):
@@ -407,7 +587,7 @@ def _demo_random(n: int = 12, seed: int = 0):
     if info.status == "ok":
         print(f"  U strictly upper? {is_strictly_upper(U)}")
         print(f"  L lower?          {is_lower(L)}")
-        print(f"  residual = {twisted_residual(A, Lam, U, L):.3e}")
+        print(f"  residual = {bilinear_residual(A, Lam, U, L):.3e}")
     else:
         print(f"  {info.detail}")
 
@@ -427,7 +607,7 @@ def _demo_fbm(n: int = 10, H: float = 0.7, lam: float = 0.5):
     U, L, info = backward_triangular_elimination(A, Lam)
     print(f"  status   = {info.status}")
     if info.status == "ok":
-        print(f"  residual = {twisted_residual(A, Lam, U, L):.3e}")
+        print(f"  residual = {bilinear_residual(A, Lam, U, L):.3e}")
         print(f"  ||U||_F  = {np.linalg.norm(U):.4f}")
         print(f"  ||L||_F  = {np.linalg.norm(L):.4f}")
 
