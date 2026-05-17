@@ -439,14 +439,20 @@ def backward_triangular_elimination_robust(
             L_kk = (lam - float(s @ beta)) / pi_k
             L[k, k] = L_kk
             if r == 0:
-                # Regular subproblem: full L column.
                 z = np.linalg.solve(K0, beta)
                 w = np.linalg.solve(K0, U0_alpha)
-                L[J, k] = z - w * L_kk
             else:
-                # Singular subproblem: off-diagonal entries are
-                # perturbation-dependent; flag as NaN.
-                L[J, k] = np.nan
+                # Singular subproblem: K_0 is rank-deficient, but the
+                # augmented system [K_0; V^T] z = [beta; 0] picks the
+                # V-orthogonal z (likewise w). These values are needed
+                # for subsequent steps' M = I + A_0 L_finite — flagging
+                # them NaN here corrupts later computations.
+                aug_K0 = np.vstack([K0, V_embed.T])
+                rhs_z = np.concatenate([beta, np.zeros(r)])
+                rhs_w = np.concatenate([U0_alpha, np.zeros(r)])
+                z, *_ = np.linalg.lstsq(aug_K0, rhs_z, rcond=None)
+                w, *_ = np.linalg.lstsq(aug_K0, rhs_w, rcond=None)
+            L[J, k] = z - w * L_kk
 
     info = {
         'bad_pivots': [(b['index'], b['pi_k']) for b in bad_cols],
@@ -651,9 +657,22 @@ def backward_triangular_elimination_robust_efficient(
             if r == 0 and N_inv_valid:
                 z = N_inv @ beta
                 w = N_inv @ U0_alpha
-                L[J, k] = z - w * L_kk
             else:
-                L[J, k] = np.nan
+                # Singular subproblem or N_inv invalidated: augmented
+                # constrained solve picks the V-orthogonal z, w; these
+                # are needed for subsequent steps' M_finite = I + A_0 L.
+                K0_eff = np.eye(J_size) + U0 @ A0
+                if r > 0:
+                    aug = np.vstack([K0_eff, V_embed.T])
+                    rhs_z = np.concatenate([beta, np.zeros(r)])
+                    rhs_w = np.concatenate([U0_alpha, np.zeros(r)])
+                else:
+                    aug = K0_eff
+                    rhs_z = beta
+                    rhs_w = U0_alpha
+                z, *_ = np.linalg.lstsq(aug, rhs_z, rcond=None)
+                w, *_ = np.linalg.lstsq(aug, rhs_w, rcond=None)
+            L[J, k] = z - w * L_kk
 
     info = {
         'bad_pivots': [(b['index'], b['pi_k']) for b in bad_cols],
