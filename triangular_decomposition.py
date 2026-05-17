@@ -130,10 +130,11 @@ def backward_triangular_elimination(
         # The only essential test. By Remark "dichotomy" the consistency
         # branch (rhs == 0 inside pi_k == 0) is unreachable for SPD inputs,
         # so a zero pivot always means: no lower-triangular L exists.
-        # U from Prop 1 still exists; we recompute it via the iterative
-        # fallback so callers can always use U in the finance theorem.
+        # U from Prop 1 still exists; recompute it via the robust variant
+        # (which handles the entire SPD cone in finite arithmetic) so
+        # callers can always use U in the finance theorem.
         if abs(pi_k) < tol:
-            U_full, _ = _triangular_inverse_via_newton(A, Lambda)
+            U_full, _, _ = backward_triangular_elimination_robust(A, Lambda)
             return U_full, None, TriangularDecompositionInfo(
                 status="no_bilinear_L",
                 failed_step=k + 1,
@@ -215,7 +216,7 @@ def backward_triangular_elimination_efficient(
             q = b_p @ M_inv
             s_M = a_p - float(b_p @ p)
             if abs(s_M) < tol:
-                U_full, _ = _triangular_inverse_via_newton(A, Lambda)
+                U_full, _, _ = backward_triangular_elimination_robust(A, Lambda)
                 return U_full, None, TriangularDecompositionInfo(
                     status="no_bilinear_L", failed_step=k + 1, pivot=s_M,
                     detail="Schur complement of (I + A_0 L_0) is singular; "
@@ -236,7 +237,7 @@ def backward_triangular_elimination_efficient(
             q2 = b_pp @ N_inv
             s_N = a_pp - float(b_pp @ p2)
             if abs(s_N) < tol:
-                U_full, _ = _triangular_inverse_via_newton(A, Lambda)
+                U_full, _, _ = backward_triangular_elimination_robust(A, Lambda)
                 return U_full, None, TriangularDecompositionInfo(
                     status="no_bilinear_L", failed_step=k + 1, pivot=s_N,
                     detail="Schur complement of (I + U_0 A_0) is singular; "
@@ -264,7 +265,7 @@ def backward_triangular_elimination_efficient(
         A0_new = A[np.ix_(J, J)]
         pi_k = 1.0 + float(u @ alpha) - float(u @ A0_new @ w)
         if abs(pi_k) < tol:
-            U_full, _ = _triangular_inverse_via_newton(A, Lambda)
+            U_full, _, _ = backward_triangular_elimination_robust(A, Lambda)
             return U_full, None, TriangularDecompositionInfo(
                 status="no_bilinear_L", failed_step=k + 1, pivot=pi_k,
                 detail=f"pi_k={pi_k:g}; U returned is Prop. 1's inverse-decomposition U.",
@@ -476,16 +477,18 @@ def triangular_inverse_decomposition(
 
     Strategy: try the direct backward elimination first. If it succeeds,
     extract U from the bilinear decomposition (the U is the same matrix).
-    If the elimination hits a zero pivot, fall back to the iterative
-    primal solver in `constrained_decomposition_core`.
+    If the elimination hits a zero pivot, fall back to the robust variant
+    that handles the entire SPD cone in finite arithmetic.
     """
     U, L, info = backward_triangular_elimination(A, Lambda, tol=tol)
     if info.status == "ok":
         S = Lambda - U - U.T - U @ A @ U.T
         return U, S
 
-    # Fall back to general iterative solver.
-    return _triangular_inverse_via_newton(A, Lambda)
+    # Fall back to robust variant (always returns U for SPD pairs).
+    U, _, _ = backward_triangular_elimination_robust(A, Lambda)
+    S = Lambda - U - U.T - U @ A @ U.T
+    return U, S
 
 
 def _triangular_inverse_via_newton(A: np.ndarray, Lambda: np.ndarray):
