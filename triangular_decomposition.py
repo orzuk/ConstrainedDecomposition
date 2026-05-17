@@ -457,6 +457,213 @@ def backward_triangular_elimination_robust(
 
 
 # -----------------------------------------------------------------------------
+# Robust O(n^3) variant: incremental inverse maintenance + SM corrections
+# -----------------------------------------------------------------------------
+
+def backward_triangular_elimination_robust_efficient(
+    A: np.ndarray,
+    Lambda: np.ndarray,
+    tol: float = 1e-10,
+) -> Tuple[np.ndarray, np.ndarray, dict]:
+    """
+    O(n^3) version of `backward_triangular_elimination_robust` (regular phase).
+
+    Maintains the trailing-block inverses
+        M_inv  = (I + A_0 L_0^finite)^{-1},    N_inv = K_0^{-1} = (I + U_0 A_0)^{-1},
+    via Schur-bordering updates as the trailing block J = {k+1, ..., n}
+    grows, with NaN columns of L read as 0 throughout.
+
+    M_inv is always maintained (M_finite stays non-singular even after a
+    bad pivot, because the NaN-as-0 convention zeroes out the divergent
+    column of L). The primal Sherman-Morrison correction uses M_inv
+    directly, so each step costs O(|J|^2) + O(r |J|^2 + r^3) where
+    r = |B cap J| is the number of bad pivots so far.
+
+    N_inv is maintained while K_0 is non-singular (i.e., while B is empty).
+    Once a pivot vanishes, K_0 becomes singular at the next step and
+    further N_inv updates fail; from then on the dual augmented system
+    [K_0^T; V^T] s = [A_0 u; 0] is solved from scratch via lstsq at each
+    step (O(|J|^3) per step in the singular phase).
+
+    Total complexity:
+        - O(n^3) overall when no bad pivots occur (matches `_efficient`).
+        - O(n^3) + O(n^4) worst-case when the first bad pivot occurs early;
+          in practice when |B| = O(1) and the bad pivot is near step 1,
+          the singular phase is short and total cost is close to O(n^3).
+
+    Returns the same (U, L, info) triple as `backward_triangular_elimination_robust`.
+    """
+    A = np.asarray(A, dtype=float)
+    Lambda = np.asarray(Lambda, dtype=float)
+    n = A.shape[0]
+    if A.shape != (n, n) or Lambda.shape != (n, n):
+        raise ValueError("A and Lambda must be square of the same size.")
+
+    U = np.zeros((n, n), dtype=float)
+    L = np.zeros((n, n), dtype=float)
+    bad_cols = []
+
+    if n == 0:
+        return U, L, {'bad_pivots': [], 'num_bad': 0, 'status': 'ok'}
+
+    L[n - 1, n - 1] = Lambda[n - 1, n - 1]
+    if n == 1:
+        return U, L, {'bad_pivots': [], 'num_bad': 0, 'status': 'ok'}
+
+    M_inv = np.empty((0, 0), dtype=float)
+    N_inv = np.empty((0, 0), dtype=float)
+    N_inv_valid = True  # K_0^{-1} cached and current
+
+    for k in range(n - 2, -1, -1):
+        J = np.arange(k + 1, n)
+        J_prev = np.arange(k + 2, n)
+        new_idx = k + 1
+        J_size = J.size
+
+        a_new = float(A[new_idx, new_idx])
+        L_diag_raw = L[new_idx, new_idx]
+        L_diag = 0.0 if np.isnan(L_diag_raw) else float(L_diag_raw)
+        alpha_A = A[J_prev, new_idx] if J_prev.size else np.empty(0)
+        y_new_raw = L[J_prev, new_idx] if J_prev.size else np.empty(0)
+        y_new = np.where(np.isnan(y_new_raw), 0.0, y_new_raw)
+        u_row = U[new_idx, J_prev] if J_prev.size else np.empty(0)
+
+        # ---- Schur bordering update for M_inv (always succeeds) ----
+        if J_prev.size == 0:
+            M_inv = np.array([[1.0 / (1.0 + a_new * L_diag)]])
+            N_inv = np.array([[1.0]])
+        else:
+            L0_old_raw = L[np.ix_(J_prev, J_prev)]
+            L0_old = np.where(np.isnan(L0_old_raw), 0.0, L0_old_raw)
+            A0_old = A[np.ix_(J_prev, J_prev)]
+            U0_old = U[np.ix_(J_prev, J_prev)]
+
+            a_p = 1.0 + a_new * L_diag + float(alpha_A @ y_new)
+            b_p = L0_old.T @ alpha_A
+            c_p = alpha_A * L_diag + A0_old @ y_new
+            p = M_inv @ c_p
+            q = b_p @ M_inv
+            s_M = a_p - float(b_p @ p)
+            if abs(s_M) < tol:
+                # rare; fall back to naive robust
+                return backward_triangular_elimination_robust(A, Lambda, tol=tol)
+            M_new = np.empty((J_size, J_size))
+            M_new[0, 0] = 1.0 / s_M
+            M_new[0, 1:] = -q / s_M
+            M_new[1:, 0] = -p / s_M
+            M_new[1:, 1:] = M_inv + np.outer(p, q) / s_M
+            M_inv = M_new
+
+            # ---- Schur bordering update for N_inv (only while K_0 non-singular) ----
+            if N_inv_valid:
+                a_pp = 1.0 + float(u_row @ alpha_A)
+                b_pp = A0_old @ u_row
+                c_pp = U0_old @ alpha_A
+                p2 = N_inv @ c_pp
+                q2 = b_pp @ N_inv
+                s_N = a_pp - float(b_pp @ p2)
+                if abs(s_N) < tol:
+                    # K_0 has just become singular (s_N = pi_{new_idx} which
+                    # was 0 at that step). From here on, use lstsq for dual.
+                    N_inv_valid = False
+                else:
+                    N_new = np.empty((J_size, J_size))
+                    N_new[0, 0] = 1.0 / s_N
+                    N_new[0, 1:] = -q2 / s_N
+                    N_new[1:, 0] = -p2 / s_N
+                    N_new[1:, 1:] = N_inv + np.outer(p2, q2) / s_N
+                    N_inv = N_new
+
+        alpha = A[J, k]
+        beta = Lambda[J, k]
+        lam = float(Lambda[k, k])
+        A0 = A[np.ix_(J, J)]
+        U0 = U[np.ix_(J, J)]
+
+        # ---- Build V, E from bad_cols (all have index > k, so all in J) ----
+        r = len(bad_cols)
+        if r > 0:
+            V_embed = np.zeros((J_size, r))
+            E_mat = np.zeros((J_size, r))
+            for i, b in enumerate(bad_cols):
+                j = b['index']
+                pos = j - (k + 1)
+                v_full = b['direction']
+                end = min(pos + len(v_full), J_size)
+                V_embed[pos:end, i] = v_full[: end - pos]
+                E_mat[pos, i] = 1.0
+            A_prime = A0 @ V_embed
+
+        # ---- Primal SM correction on u (uses cached M_inv) ----
+        # M_inv stores (I + A_0 L_finite)^{-1}; M^T inverse acts via M_inv.T
+        u_base = M_inv.T @ beta
+        if r > 0:
+            MtinvE = M_inv.T @ E_mat
+            denom = A_prime.T @ MtinvE
+            try:
+                lhs = np.linalg.solve(denom, A_prime.T @ u_base)
+            except np.linalg.LinAlgError:
+                lhs, *_ = np.linalg.lstsq(denom, A_prime.T @ u_base, rcond=None)
+            u = u_base - MtinvE @ lhs
+        else:
+            u = u_base
+        U[k, J] = u
+
+        # ---- Dual: compute s for pi_k and L_kk ----
+        A0u = A0 @ u
+        if r > 0 or not N_inv_valid:
+            # Augmented system from scratch (O(|J|^3) per step)
+            K0 = np.eye(J_size) + U0 @ A0
+            if r > 0:
+                aug = np.vstack([K0.T, V_embed.T])
+                rhs = np.concatenate([A0u, np.zeros(r)])
+            else:
+                aug = K0.T
+                rhs = A0u
+            s, *_ = np.linalg.lstsq(aug, rhs, rcond=None)
+        else:
+            s = N_inv.T @ A0u
+
+        U0_alpha = U0 @ alpha
+        pi_k = 1.0 + float(u @ alpha) - float(s @ U0_alpha)
+
+        if abs(pi_k) < tol:
+            # Bad pivot: compute w (constrained) and append (k, v_k) to bad_cols
+            if r > 0:
+                K0 = np.eye(J_size) + U0 @ A0
+                aug = np.vstack([K0, V_embed.T])
+                rhs_w = np.concatenate([U0_alpha, np.zeros(r)])
+                w, *_ = np.linalg.lstsq(aug, rhs_w, rcond=None)
+            elif N_inv_valid:
+                w = N_inv @ U0_alpha
+            else:
+                K0 = np.eye(J_size) + U0 @ A0
+                w, *_ = np.linalg.lstsq(K0, U0_alpha, rcond=None)
+            v_k = np.concatenate([[1.0], -w])
+            bad_cols.append({'index': k, 'pi_k': pi_k, 'direction': v_k})
+            L[k, k] = np.nan
+            L[J, k] = np.nan
+            # Mark N_inv as invalid for future steps (K_0 will be singular)
+            N_inv_valid = False
+        else:
+            L_kk = (lam - float(s @ beta)) / pi_k
+            L[k, k] = L_kk
+            if r == 0 and N_inv_valid:
+                z = N_inv @ beta
+                w = N_inv @ U0_alpha
+                L[J, k] = z - w * L_kk
+            else:
+                L[J, k] = np.nan
+
+    info = {
+        'bad_pivots': [(b['index'], b['pi_k']) for b in bad_cols],
+        'num_bad': len(bad_cols),
+        'status': 'ok' if not bad_cols else 'has_bad_pivots',
+    }
+    return U, L, info
+
+
+# -----------------------------------------------------------------------------
 # Inverse-triangular variant
 # -----------------------------------------------------------------------------
 
