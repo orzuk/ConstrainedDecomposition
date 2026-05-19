@@ -36,12 +36,15 @@ def almgren_chriss_tridiagonal(n: int, lam: float = 1.0) -> np.ndarray:
     """
     Almgren-Chriss tridiagonal permanent-impact cost matrix.
 
-    A_{ii} = lambda for all i, A_{i, i+/-1} = -lambda/2, zero elsewhere.
+    A_{ii} = 2*lambda for all i, A_{i, i+/-1} = -lambda, zero elsewhere.
+    This corresponds to the cost (1/2) * gamma^T A gamma
+    = (lambda/2) * sum_{i=1}^{n+1} (gamma_i - gamma_{i-1})^2
+    with gamma_0 = gamma_{n+1} = 0.
     Positive definite for every lambda > 0 and n >= 1 (eigenvalues lie in
-    (0, 2*lambda)).
+    (0, 4*lambda)).
     """
-    A = lam * np.eye(n)
-    off = -0.5 * lam
+    A = 2.0 * lam * np.eye(n)
+    off = -lam
     i = np.arange(n - 1)
     A[i, i + 1] = off
     A[i + 1, i] = off
