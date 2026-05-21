@@ -86,16 +86,22 @@ def plot_value_vs_lambda(df: pd.DataFrame, n: int, output_path: Path) -> None:
     plt.rcParams["mathtext.fontset"] = "cm"
     fig, ax = plt.subplots(figsize=(7.0, 4.2))
     H_values = sorted(df["H"].unique())
-    cmap = plt.get_cmap("viridis")
-    for i, H in enumerate(H_values):
+    cmap = plt.get_cmap("coolwarm")
+    H_min = min(H_values)
+    H_max = max(H_values)
+    H_span = max(H_max - H_min, 1e-12)
+    for H in H_values:
         sub = df[df["H"] == H].sort_values("lambda")
-        color = cmap(i / max(1, len(H_values) - 1)) if len(H_values) > 1 else cmap(0.5)
+        if abs(H - 0.5) < 1e-9:
+            color = "0.25"  # dark neutral grey for the Brownian curve
+        else:
+            color = cmap((H - H_min) / H_span)
         ax.plot(sub["lambda"], sub["CE"], color=color,
                 marker="o", markersize=3.5, linewidth=1.4,
                 label=fr"$H={H:g}$")
     ax.set_xscale("log")
-    ax.set_xlabel(r"Quadratic cost magnitude $\lambda$")
-    ax.set_ylabel(r"Certainty-equivalent value  $\frac{1}{2}(\log|\Sigma|+\log|S_U|)$")
+    ax.set_xlabel(r"$\lambda$")
+    ax.set_ylabel(r"$\frac{1}{2}(\log|\Sigma|+\log|S_U|)$")
     ax.set_title(rf"Optimal value vs. quadratic cost magnitude ($n={n}$)")
     ax.grid(True, which="both", alpha=0.3)
     ax.legend(frameon=False)
@@ -106,11 +112,11 @@ def plot_value_vs_lambda(df: pd.DataFrame, n: int, output_path: Path) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--n", type=int, default=100)
+    ap.add_argument("--n", type=int, default=200)
     ap.add_argument("--H", type=float, nargs="+",
-                    default=[0.25, 0.4, 0.5, 0.6, 0.75])
+                    default=[0.1, 0.3, 0.5, 0.7, 0.9])
     ap.add_argument("--lambda-min", type=float, default=1e-3)
-    ap.add_argument("--lambda-max", type=float, default=1e5)
+    ap.add_argument("--lambda-max", type=float, default=1e2)
     ap.add_argument("--n-lambda", type=int, default=50)
     ap.add_argument("--output-dir", type=Path, default=Path("figs"))
     args = ap.parse_args()
